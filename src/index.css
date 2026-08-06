@@ -1,0 +1,58 @@
+@import "tailwindcss";
+
+:root {
+  --ss-bg: rgba(18, 18, 24, 0.72);
+  --ss-bg-solid: #121218;
+  --ss-border: rgba(255, 255, 255, 0.08);
+  --ss-accent: #7c7cf0;
+  --ss-accent-soft: rgba(124, 124, 240, 0.16);
+  --ss-text: #ececf1;
+  --ss-text-dim: #9a9aa5;
+  --ss-text-faint: #5c5c68;
+}
+
+html,
+body {
+  background: transparent;
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  color: var(--ss-text);
+  -webkit-font-smoothing: antialiased;
+}
+
+#root {
+  height: 100%;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Slim dark scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+::selection {
+  background: rgba(124, 124, 240, 0.4);
+}
+
+mark {
+  background: rgba(124, 124, 240, 0.35);
+  color: #fff;
+  border-radius: 2px;
+  padding: 0 1px;
+}
