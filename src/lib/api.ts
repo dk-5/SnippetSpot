@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  AppItem,
   BackupInfo,
   ClipboardEntry,
   PasteMode,
@@ -56,6 +57,24 @@ export function getAutostart(): Promise<boolean> {
 
 export function setAutostart(enabled: boolean): Promise<void> {
   return call("set_autostart", "Failed to set autostart setting", { enabled });
+}
+
+export function appList(): Promise<AppItem[]> {
+  return call("app_list", "Failed to list apps");
+}
+
+export function appLaunch(path: string): Promise<void> {
+  return call("app_launch", "Failed to launch app", { path });
+}
+
+export function getShowOnStartup(): Promise<boolean> {
+  return call("get_show_on_startup", "Failed to get show-on-startup setting");
+}
+
+export function setShowOnStartup(enabled: boolean): Promise<void> {
+  return call("set_show_on_startup", "Failed to set show-on-startup setting", {
+    enabled,
+  });
 }
 
 export function readTextFile(path: string): Promise<string> {

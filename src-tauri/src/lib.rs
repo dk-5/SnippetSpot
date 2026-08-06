@@ -1,3 +1,4 @@
+mod apps;
 mod backup;
 mod clipboard;
 mod hotkey;
@@ -7,9 +8,10 @@ mod secrets;
 mod variables;
 mod vault;
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
+use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, PhysicalSize};
 
 pub(crate) struct Settings {
     pub(crate) hotkey: Mutex<String>,
@@ -17,6 +19,7 @@ pub(crate) struct Settings {
     pub(crate) clipboard_enabled: Mutex<bool>,
     pub(crate) clipboard_cap: Mutex<usize>,
     pub(crate) backup_retention: Mutex<u32>,
+    pub(crate) show_popup_on_startup: Mutex<bool>,
 }
 
 const DEFAULT_HOTKEY: &str = "Alt+Space";
@@ -50,20 +53,25 @@ pub fn run() {
             let clipboard_enabled = *settings.clipboard_enabled.lock().unwrap();
             let clipboard_cap = *settings.clipboard_cap.lock().unwrap();
             let backup_retention = *settings.backup_retention.lock().unwrap();
+            let show_popup_on_startup = *settings.show_popup_on_startup.lock().unwrap();
             handle.manage(Settings {
                 hotkey: Mutex::new(hotkey.clone()),
                 paste_mode: Mutex::new(paste_mode),
                 clipboard_enabled: Mutex::new(clipboard_enabled),
                 clipboard_cap: Mutex::new(clipboard_cap),
                 backup_retention: Mutex::new(backup_retention),
+                show_popup_on_startup: Mutex::new(show_popup_on_startup),
             });
             handle.manage(clipboard::ClipboardState {
                 enabled: Mutex::new(clipboard_enabled),
                 cap: Mutex::new(clipboard_cap),
                 last_app_write: Mutex::new(std::time::Instant::now()),
             });
-
-            apply_window_effects(&handle);
+            let pending_show_popup = Arc::new(AtomicBool::new(show_popup_on_startup));
+            handle.manage(apps::AppsState {
+                items: Mutex::new(Vec::new()),
+            });
+            apps::start_enumeration(handle.clone());
 
             if let Err(e) = hotkey::start_hotkey(handle.clone(), &hotkey) {
                 eprintln!("[snippetspot] failed to start hotkey: {e}");
@@ -74,7 +82,34 @@ pub fn run() {
             }
 
             clipboard::start_watcher(handle.clone());
-            backup::run_startup_backup(&handle);
+            {
+                let backup_handle = handle.clone();
+                std::thread::spawn(move || backup::run_startup_backup(&backup_handle));
+            }
+
+            if show_popup_on_startup {
+                let listener_handle = handle.clone();
+                let listener_pending = pending_show_popup.clone();
+                let _ = handle.listen("popup-ready", move |_| {
+                    if listener_pending.swap(false, Ordering::SeqCst) {
+                        apply_window_effects(&listener_handle);
+                        crate::do_show_popup(&listener_handle);
+                    }
+                });
+                let fallback_handle = handle.clone();
+                std::thread::spawn(move || {
+                    for _ in 0..60 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if !pending_show_popup.load(Ordering::SeqCst) {
+                            return;
+                        }
+                    }
+                    if pending_show_popup.swap(false, Ordering::SeqCst) {
+                        apply_window_effects(&fallback_handle);
+                        crate::do_show_popup(&fallback_handle);
+                    }
+                });
+            }
 
             Ok(())
         })
@@ -104,6 +139,10 @@ pub fn run() {
             set_paste_mode,
             get_autostart,
             set_autostart,
+            get_show_on_startup,
+            set_show_on_startup,
+            apps::app_list,
+            apps::app_launch,
             read_text_file,
             write_text_file,
             quit_app,
@@ -242,6 +281,7 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
                 clipboard_enabled: Mutex::new(clipboard::DEFAULT_CLIPBOARD_HISTORY_ENABLED),
                 clipboard_cap: Mutex::new(clipboard::DEFAULT_CLIPBOARD_HISTORY_CAP),
                 backup_retention: Mutex::new(backup::DEFAULT_BACKUP_RETENTION),
+                show_popup_on_startup: Mutex::new(false),
             };
         }
     };
@@ -266,6 +306,10 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
         .get("backup_retention")
         .and_then(|v| v.as_u64().map(|n| n as u32))
         .unwrap_or(backup::DEFAULT_BACKUP_RETENTION);
+    let show_popup_on_startup = store
+        .get("show_popup_on_startup")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     let mut changed = false;
     if store.get("hotkey").is_none() {
@@ -288,6 +332,10 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
         store.set("backup_retention", backup::DEFAULT_BACKUP_RETENTION);
         changed = true;
     }
+    if store.get("show_popup_on_startup").is_none() {
+        store.set("show_popup_on_startup", false);
+        changed = true;
+    }
     if changed {
         if let Err(e) = store.save() {
             eprintln!("[snippetspot] failed to persist settings: {e}");
@@ -300,6 +348,7 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
         clipboard_enabled: Mutex::new(clipboard_enabled),
         clipboard_cap: Mutex::new(clipboard_cap),
         backup_retention: Mutex::new(backup_retention),
+        show_popup_on_startup: Mutex::new(show_popup_on_startup),
     }
 }
 
@@ -454,20 +503,66 @@ fn set_paste_mode(app: AppHandle, mode: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_autostart(app: AppHandle) -> bool {
-    use tauri_plugin_autostart::ManagerExt;
-
-    app.autolaunch().is_enabled().unwrap_or(false)
+fn get_autostart(_app: AppHandle) -> bool {
+    autostart_enabled()
 }
 
 #[tauri::command]
-fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
-    use tauri_plugin_autostart::ManagerExt;
+fn set_autostart(_app: AppHandle, enabled: bool) -> Result<(), String> {
+    autostart_set(enabled)
+}
 
-    if enabled {
-        app.autolaunch().enable().map_err(|e| e.to_string())
+#[tauri::command]
+fn get_show_on_startup(app: AppHandle) -> bool {
+    if let Some(state) = app.try_state::<Settings>() {
+        *state.show_popup_on_startup.lock().unwrap()
     } else {
-        app.autolaunch().disable().map_err(|e| e.to_string())
+        crate::get_setting_value(&app, "show_popup_on_startup")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    }
+}
+
+#[tauri::command]
+fn set_show_on_startup(app: AppHandle, enabled: bool) -> Result<(), String> {
+    autostart_set(enabled)?;
+    crate::set_setting_value(&app, "show_popup_on_startup", serde_json::Value::Bool(enabled))?;
+    if let Some(state) = app.try_state::<Settings>() {
+        *state.show_popup_on_startup.lock().unwrap() = enabled;
+    }
+    Ok(())
+}
+
+const AUTOSTART_VALUE: &str = "SnippetSpot";
+const AUTOSTART_RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+
+fn autostart_enabled() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    if let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(AUTOSTART_RUN_KEY) {
+        return key.get_value::<String, _>(AUTOSTART_VALUE).is_ok();
+    }
+    false
+}
+
+fn autostart_set(enabled: bool) -> Result<(), String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE};
+    use winreg::RegKey;
+
+    let key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(AUTOSTART_RUN_KEY, KEY_QUERY_VALUE | KEY_SET_VALUE)
+        .map_err(|e| e.to_string())?;
+    if enabled {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        key.set_value(AUTOSTART_VALUE, &format!("\"{}\"", exe.display()))
+            .map_err(|e| e.to_string())
+    } else {
+        match key.delete_value(AUTOSTART_VALUE) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 

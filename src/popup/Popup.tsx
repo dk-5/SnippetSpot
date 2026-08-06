@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { ClipboardEntry, SearchHit, Snippet, VaultItem } from "../lib/types";
+import { emit } from "@tauri-apps/api/event";
+import type { AppItem, ClipboardEntry, SearchHit, Snippet, VaultItem } from "../lib/types";
 import { SnippetIndex } from "../lib/search";
 import {
   deleteSnippet,
@@ -9,6 +10,8 @@ import {
   recordUsage,
 } from "../lib/db";
 import {
+  appLaunch,
+  appList,
   clipboardClear,
   clipboardDelete,
   clipboardList,
@@ -24,6 +27,7 @@ import {
   vaultPasteSecret,
   vaultPasteUsername,
 } from "../lib/api";
+import { filterApps } from "../lib/appFilter";
 
 function highlightText(query: string, text: string): ReactNode {
   const q = query.trim().toLowerCase();
@@ -92,11 +96,13 @@ function filterHistory(
 
 type PopupRow =
   | { kind: "snippet"; hit: SearchHit }
+  | { kind: "app"; app: AppItem }
   | { kind: "vault"; item: VaultItem };
 
 export function Popup() {
   const [snippets, setSnippets] = useState<Snippet[]>([]);
   const [index, setIndex] = useState<SnippetIndex | null>(null);
+  const [apps, setApps] = useState<AppItem[]>([]);
   const [vaultItems, setVaultItems] = useState<VaultItem[]>([]);
   const [historyEntries, setHistoryEntries] = useState<ClipboardEntry[]>([]);
   const [historyMode, setHistoryMode] = useState(false);
@@ -107,8 +113,8 @@ export function Popup() {
   const [diag, setDiag] = useState("");
 
   const inputRef = useRef<HTMLInputElement>(null);
-  const stateRef = useRef({ query, selected, index, vaultItems, historyEntries, historyMode, vaultMenu, menuSel });
-  stateRef.current = { query, selected, index, vaultItems, historyEntries, historyMode, vaultMenu, menuSel };
+  const stateRef = useRef({ query, selected, index, apps, vaultItems, historyEntries, historyMode, vaultMenu, menuSel });
+  stateRef.current = { query, selected, index, apps, vaultItems, historyEntries, historyMode, vaultMenu, menuSel };
 
   const results = useMemo(
     () => (index ? index.search(query, 12) : []),
@@ -120,6 +126,11 @@ export function Popup() {
     [vaultItems, query]
   );
 
+  const appResults = useMemo(
+    () => filterApps(apps, query),
+    [apps, query]
+  );
+
   const historyResults = useMemo(
     () => filterHistory(historyEntries, query),
     [historyEntries, query]
@@ -129,8 +140,9 @@ export function Popup() {
     const out: PopupRow[] = [];
     for (const hit of results) out.push({ kind: "snippet", hit });
     for (const item of vaultResults) out.push({ kind: "vault", item });
+    for (const app of appResults) out.push({ kind: "app", app });
     return out;
-  }, [results, vaultResults]);
+  }, [results, appResults, vaultResults]);
 
   const refresh = useCallback(async () => {
     await initDb();
@@ -160,6 +172,14 @@ export function Popup() {
     vaultList()
       .then(setVaultItems)
       .catch(() => {});
+    appList()
+      .then(setApps)
+      .catch(() => {});
+    const appRefreshTimer = window.setTimeout(() => {
+      appList()
+        .then(setApps)
+        .catch(() => {});
+    }, 4000);
     refreshClipboard();
     let unlistenPopup: (() => void) | null = null;
     let unlistenClipboard: (() => void) | null = null;
@@ -173,13 +193,21 @@ export function Popup() {
       vaultList()
         .then(setVaultItems)
         .catch(() => {});
+      appList()
+        .then(setApps)
+        .catch(() => {});
     }).then((fn) => {
       unlistenPopup = fn;
     });
     onClipboardHistoryChanged(() => refreshClipboard()).then((fn) => {
       unlistenClipboard = fn;
     });
+    const readyTimer = window.setTimeout(() => {
+      emit("popup-ready").catch(() => {});
+    }, 120);
     return () => {
+      window.clearTimeout(readyTimer);
+      window.clearTimeout(appRefreshTimer);
       unlistenPopup?.();
       unlistenClipboard?.();
     };
@@ -200,6 +228,7 @@ export function Popup() {
         query: q,
         selected: selIdx,
         index: idx,
+        apps: appState,
         vaultItems: vaults,
         historyEntries: entries,
         historyMode: histMode,
@@ -283,14 +312,20 @@ export function Popup() {
       }
 
       const snipHits = idx ? idx.search(q, 12) : [];
+      const appHits = filterApps(appState, q);
       const vaultList = filterVaultItems(vaults, q);
-      const total = snipHits.length + vaultList.length;
+      const total = snipHits.length + appHits.length + vaultList.length;
       const selectedRow: PopupRow | null =
         selIdx < snipHits.length
           ? { kind: "snippet", hit: snipHits[selIdx] }
-          : selIdx < total
+          : selIdx < snipHits.length + vaultList.length
             ? { kind: "vault", item: vaultList[selIdx - snipHits.length] }
-            : null;
+            : selIdx < total
+              ? {
+                  kind: "app",
+                  app: appHits[selIdx - snipHits.length - vaultList.length],
+                }
+              : null;
 
       if (vm) {
         const opts = vaultMenuOptions(vm);
@@ -325,6 +360,10 @@ export function Popup() {
         if (selectedRow?.kind === "snippet") {
           e.preventDefault();
           handlePaste(selectedRow.hit.snippet);
+        } else if (selectedRow?.kind === "app") {
+          e.preventDefault();
+          appLaunch(selectedRow.app.path).catch((err) => setDiag(String(err)));
+          void hidePopup();
         } else if (selectedRow?.kind === "vault") {
           e.preventDefault();
           setVaultMenu(selectedRow.item);
@@ -550,6 +589,44 @@ export function Popup() {
             })}
           </div>
         )}
+        {appResults.length > 0 && (
+          <div className="mt-2">
+            <div className="px-3 pb-1 text-[11px] font-medium uppercase tracking-wide text-[var(--ss-text-faint)]">
+              Apps
+            </div>
+            {appResults.map((app, i) => {
+              const rowIndex = results.length + vaultResults.length + i;
+              const rowSelected = rowIndex === selected;
+              return (
+                <button
+                  key={app.path}
+                  type="button"
+                  onClick={() => {
+                    setSelected(rowIndex);
+                    appLaunch(app.path).catch((err) => setDiag(String(err)));
+                    void hidePopup();
+                  }}
+                  onMouseEnter={() => setSelected(rowIndex)}
+                  className={`flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-colors ${
+                    rowSelected ? "bg-white/10" : "hover:bg-white/5"
+                  }`}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className="shrink-0 text-sm text-[var(--ss-text-faint)]">
+                      ▸
+                    </span>
+                    <span className="truncate text-[15px] font-medium text-[var(--ss-text)]">
+                      {highlightText(query, app.name)}
+                    </span>
+                  </span>
+                  <span className="truncate text-[13px] text-[var(--ss-text-dim)]">
+                    {app.path}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
       </>
     );
   }
@@ -580,7 +657,7 @@ export function Popup() {
         <span>
           {historyMode
             ? "Clipboard history — Enter paste · Del delete · P pin · Esc exit"
-            : "↑↓ navigate · Enter paste · Esc close · Ctrl+N new · Ctrl+E edit · Del delete · Ctrl+Shift+H history · vault: Enter menu"}
+            : "↑↓ navigate · Enter paste/launch · Esc close · Ctrl+N new · Ctrl+E edit · Del delete · Ctrl+Shift+H history · vault: Enter menu"}
         </span>
         {historyMode && (
           <button

@@ -71,6 +71,11 @@ export interface VaultItem {
   updated_at: string;
 }
 
+export interface AppItem {
+  name: string;
+  path: string;
+}
+
 export interface ClipboardEntry {
   id: string;
   content: string;
