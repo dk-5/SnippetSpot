@@ -19,8 +19,19 @@ Everything runs **100% locally**. No cloud, no accounts, no telemetry.
 - **Paste into any app** — simulates `Ctrl+V` (clipboard preserved) or types the text
   directly. Multiline and Unicode supported.
 - **Snippet types** — plain text, links, emails, markdown, code, templates, prompts.
-- **Full CRUD** — create, edit, delete, duplicate, favorite, and **import/export JSON**
-  backups from the manager window.
+- **Full CRUD** — create, edit, delete, duplicate, favorite, and **import/export**
+  (JSON, CSV, Markdown) backups from the manager window.
+- **Secure vault** — store credentials and API keys in the **Vault** tab: masked in the
+  UI, encrypted at rest with Windows DPAPI (user scope). In the launcher, select a
+  vault item and press `u` (username), `s` (secret), or `c` (copy). Secrets are never
+  exported or imported.
+- **Clipboard history** — press `Ctrl+Shift+H` in the launcher to browse recent
+  clipboard entries: `Enter` paste, `Del` delete, `P` pin, `Esc` exit. Toggle capture
+  and set the max entry count in Settings.
+- **Automatic backups** — a timestamped backup of your data on every launch (keeps the
+  newest 10), plus manual "Back up now" and Restore from Settings → Backups.
+- **Smart import** — import with a merge policy (skip / overwrite / rename on title)
+  and a summary of what was imported, updated, or skipped.
 - **Variables** — `{{date}}`, `{{time}}`, `{{datetime}}`, `{{clipboard}}`,
   `{{env:NAME}}`, `{{env:NAME:default}}` are expanded at paste time.
 - **System tray** — tray icon to reopen the launcher, open the manager, or quit.
@@ -90,12 +101,19 @@ Or use the wrapper: `.\scripts\build.ps1` (defaults to release) and
 | `Ctrl+E`     | Edit selected (opens manager)  |
 | `Delete`     | Delete selected                |
 | `Ctrl+F`     | Focus search field             |
+| `u` / `s` / `c` | Vault item selected: paste username / secret / copy |
+| `Ctrl+Shift+H`  | Toggle clipboard history (`Enter` paste, `Del` delete, `P` pin, `Esc` exit) |
 
 ### Manager window
 
 Opened from the tray (right-click → **Open Manager**) or via `Ctrl+N`/`Ctrl+E` in the
 launcher. Use it to create, edit, duplicate, favorite and delete snippets, organize by
-category and tags, and import/export JSON backups.
+category and tags, and import/export backups (JSON, CSV, or Markdown).
+
+The manager has a **Snippets / Vault** tab strip. The **Vault** stores credentials and
+API keys: secrets are masked in the UI and encrypted at rest with Windows DPAPI.
+Settings cover clipboard history (enabled + max entries) and backups (retention, "Back
+up now", Restore).
 
 ### Variables
 
@@ -112,9 +130,15 @@ Expanded when a snippet is pasted:
 
 ## Data & storage
 
-- **SQLite database:** `%APPDATA%\com.snippetspot.app\snippetspot.db`
-- **Settings (hotkey, paste mode):** `%APPDATA%\com.snippetspot.app\settings.json`
-- Backups via **Export JSON** in the manager.
+- **SQLite database:** `%APPDATA%\com.snippetspot.app\snippetspot.db` (snippets, vault
+  items, clipboard history)
+- **Settings:** `%APPDATA%\com.snippetspot.app\settings.json` (hotkey, paste mode,
+  clipboard history, backup retention)
+- **Backups:** `%APPDATA%\com.snippetspot.app\backups\` — automatic on every launch
+  (keeps the newest 10), plus manual backup/restore in the manager.
+
+Snippet content is stored in plaintext (lock-only design). Vault secrets are encrypted
+at rest with Windows DPAPI (user scope) and are never exported or imported.
 
 ## How paste works
 
@@ -129,18 +153,24 @@ Expanded when a snippet is pasted:
 
 ```
 src/
-  popup/Popup.tsx      launcher window (search + paste + shortcuts)
-  manager/Manager.tsx  CRUD + settings + import/export
+  popup/Popup.tsx      launcher window (search + paste + shortcuts + clipboard history)
+  manager/Manager.tsx  Snippets/Vault tabs + settings + import/export
   lib/
     search.ts          uFuzzy index + ranking        (pure, tested)
     variables.ts       variable expansion            (pure, tested)
+    secrets.ts         secret masking                (pure, tested)
+    importExport.ts    CSV/Markdown export + merge policy (pure, tested)
     db.ts              SQLite CRUD (tauri-plugin-sql)
-    api.ts             typed Tauri command wrappers
+    api.ts             typed Tauri command wrappers + event listeners
 src-tauri/src/
   lib.rs               window effects, tray, plugins, commands
   hotkey.rs            WH_KEYBOARD_LL global hook
   paste.rs             clipboard save → Ctrl+V → restore / type mode
   variables.rs         Rust-side variable expansion (paste-time)
+  secrets.rs           Windows DPAPI encrypt/decrypt (user scope)
+  vault.rs             secure vault CRUD (masked, never exported)
+  clipboard.rs         background clipboard-history watcher
+  backup.rs            automatic DB/settings backups + restore
   migrate.rs           SQLite migrations
 ```
 
@@ -150,7 +180,7 @@ side is authoritative at paste time (it can read the live clipboard).
 ## Testing
 
 ```bash
-npx vitest run     # TS unit tests (ranking, variables)
+npx vitest run     # TS unit tests (ranking, variables, secrets, import/export)
 cargo test         # Rust unit tests (variables, hotkey parsing)
 ```
 

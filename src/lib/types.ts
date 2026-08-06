@@ -58,3 +58,36 @@ export const DEFAULT_CATEGORIES = [
 ];
 
 export const DEFAULT_HOTKEY = "Alt+Space";
+
+export type VaultKind = "credential" | "api_key";
+
+export interface VaultItem {
+  id: string;
+  title: string;
+  kind: VaultKind;
+  username: string | null;
+  has_secret: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ClipboardEntry {
+  id: string;
+  content: string;
+  pinned: boolean;
+  created_at: string;
+}
+
+export interface BackupInfo {
+  name: string;
+  path: string;
+  size: number;
+  created_at: string;
+}
+
+export type ImportMergePolicy = "skip" | "overwrite" | "rename";
+
+export const VAULT_KINDS: { value: VaultKind; label: string }[] = [
+  { value: "credential", label: "Credential" },
+  { value: "api_key", label: "API key" },
+];

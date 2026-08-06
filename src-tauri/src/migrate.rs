@@ -32,5 +32,26 @@ pub fn migrations() -> Vec<Migration> {
         CREATE INDEX IF NOT EXISTS idx_snippets_favorite ON snippets (favorite);
         CREATE INDEX IF NOT EXISTS idx_snippets_usage_count ON snippets (usage_count);",
         kind: MigrationKind::Up,
+    }, Migration {
+        version: 3,
+        description: "vault_and_clipboard_tables",
+        sql: "CREATE TABLE IF NOT EXISTS vault_items (
+            id TEXT PRIMARY KEY NOT NULL,
+            title TEXT NOT NULL,
+            kind TEXT NOT NULL DEFAULT 'credential',
+            username TEXT,
+            secret_enc BLOB NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_vault_items_title ON vault_items (title);
+        CREATE TABLE IF NOT EXISTS clipboard_entries (
+            id TEXT PRIMARY KEY NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            pinned INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_clipboard_entries_created_at ON clipboard_entries (created_at);",
+        kind: MigrationKind::Up,
     }]
 }

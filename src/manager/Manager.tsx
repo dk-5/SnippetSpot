@@ -2,7 +2,14 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { DEFAULT_CATEGORIES, DEFAULT_HOTKEY, SNIPPET_TYPES } from "../lib/types";
-import type { PasteMode, Snippet, SnippetInput, SnippetType } from "../lib/types";
+import type {
+  ImportMergePolicy,
+  PasteMode,
+  Snippet,
+  SnippetInput,
+  SnippetType,
+} from "../lib/types";
+import { planImport, snippetsToCsv, snippetsToMarkdown } from "../lib/importExport";
 import { SnippetIndex } from "../lib/search";
 import {
   createSnippet,
@@ -14,6 +21,10 @@ import {
   updateSnippet,
 } from "../lib/db";
 import {
+  clipboardGetCap,
+  clipboardGetEnabled,
+  clipboardSetCap,
+  clipboardSetEnabled,
   getAutostart,
   getHotkey,
   getPasteMode,
@@ -27,6 +38,8 @@ import { expandVariables } from "../lib/variables";
 import { HotkeyRecorder } from "./HotkeyRecorder";
 import { VariableCheatsheet } from "./VariableCheatsheet";
 import { SnippetRow } from "./SnippetRow";
+import { VaultPanel } from "./VaultPanel";
+import { BackupsPanel } from "./BackupsPanel";
 
 type SortKey = "updated" | "used" | "favorite";
 
@@ -166,13 +179,22 @@ export function Manager() {
   const [base, setBase] = useState<FormState>(emptyForm);
   const [preview, setPreview] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [rightTab, setRightTab] = useState<"snippets" | "vault">("snippets");
   const [currentHotkey, setCurrentHotkey] = useState(DEFAULT_HOTKEY);
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
   const [pasteMode, setPasteModeState] = useState<PasteMode>("paste");
   const [autostart, setAutostartState] = useState(false);
+  const [clipboardEnabled, setClipboardEnabled] = useState(false);
+  const [clipboardCap, setClipboardCap] = useState("500");
+  const [mergePolicy, setMergePolicy] = useState<ImportMergePolicy>("skip");
+  const [exportOpen, setExportOpen] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
 
   const dirty = !formsEqual(form, base);
+
+  const alertError = (msg: string) => {
+    window.alert(msg);
+  };
 
   const loadSnippet = (s: Snippet) => {
     const f = formFromSnippet(s);
@@ -192,6 +214,7 @@ export function Manager() {
 
   const selectSnippet = (s: Snippet) => {
     setSettingsOpen(false);
+    setRightTab("snippets");
     loadSnippet(s);
   };
 
@@ -212,6 +235,7 @@ export function Manager() {
   const handleNew = () => {
     clearForm();
     setSettingsOpen(false);
+    setRightTab("snippets");
     setActiveCategory("All");
     requestAnimationFrame(() => titleRef.current?.focus());
   };
@@ -297,29 +321,57 @@ export function Manager() {
       const text = await readTextFile(p);
       const parsed: unknown = JSON.parse(text);
       const inputs = toInputArray(parsed);
-      const count = await importSnippets(inputs);
+      const plan = planImport(inputs, snippets, mergePolicy);
+      let created = 0;
+      if (plan.create.length > 0) {
+        created = await importSnippets(plan.create);
+      }
+      for (const u of plan.update) {
+        await updateSnippet(u.id, u.input);
+      }
       await reloadData();
-      window.alert(`Imported ${count} snippets`);
+      window.alert(
+        `Imported ${created}, updated ${plan.update.length}, skipped ${plan.skipped}`
+      );
     } catch (err) {
       console.error("Import failed", err);
       window.alert(`Import failed: ${String(err)}`);
     }
   };
 
-  const handleExport = async () => {
+  const handleExport = async (format: "json" | "csv" | "markdown") => {
     try {
       const p = await save({
-        filters: [{ name: "JSON", extensions: ["json"] }],
-        defaultPath: "snippetspot-backup.json",
+        filters:
+          format === "json"
+            ? [{ name: "JSON", extensions: ["json"] }]
+            : format === "csv"
+              ? [{ name: "CSV", extensions: ["csv"] }]
+              : [{ name: "Markdown", extensions: ["md"] }],
+        defaultPath:
+          format === "json"
+            ? "snippetspot-backup.json"
+            : format === "csv"
+              ? "snippetspot-snippets.csv"
+              : "snippetspot-snippets.md",
       });
       if (!p) return;
-      const payload = {
-        app: "snippetspot",
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        snippets,
-      };
-      await writeTextFile(p, JSON.stringify(payload, null, 2));
+      const content =
+        format === "json"
+          ? JSON.stringify(
+              {
+                app: "snippetspot",
+                version: 1,
+                exportedAt: new Date().toISOString(),
+                snippets,
+              },
+              null,
+              2
+            )
+          : format === "csv"
+            ? snippetsToCsv(snippets)
+            : snippetsToMarkdown(snippets);
+      await writeTextFile(p, content);
     } catch (err) {
       console.error("Export failed", err);
     }
@@ -355,6 +407,25 @@ export function Manager() {
     }
   };
 
+  const handleClipboardEnabled = async (enabled: boolean) => {
+    setClipboardEnabled(enabled);
+    try {
+      await clipboardSetEnabled(enabled);
+    } catch (err) {
+      console.error("Failed to set clipboard history setting", err);
+    }
+  };
+
+  const handleClipboardCap = async (raw: string) => {
+    const n = Math.max(1, Number(raw) || 1);
+    setClipboardCap(String(n));
+    try {
+      await clipboardSetCap(n);
+    } catch (err) {
+      console.error("Failed to set clipboard history cap", err);
+    }
+  };
+
   const handleRefresh = async () => {
     try {
       await reloadData();
@@ -369,15 +440,19 @@ export function Manager() {
       try {
         await initDb();
         const list = await reloadData();
-        const [hk, pm, as] = await Promise.all([
+        const [hk, pm, as, cl, cap] = await Promise.all([
           getHotkey().catch(() => DEFAULT_HOTKEY),
           getPasteMode().catch(() => "paste" as PasteMode),
           getAutostart().catch(() => false),
+          clipboardGetEnabled().catch(() => false),
+          clipboardGetCap().catch(() => 500),
         ]);
         if (cancelled) return;
         setCurrentHotkey(hk);
         setPasteModeState(pm);
         setAutostartState(as);
+        setClipboardEnabled(cl);
+        setClipboardCap(String(cap));
         const target = localStorage.getItem("ss_edit_target");
         localStorage.removeItem("ss_edit_target");
         if (target) {
@@ -457,6 +532,18 @@ export function Manager() {
         >
           New
         </button>
+        <select
+          value={mergePolicy}
+          onChange={(e) => setMergePolicy(e.target.value as ImportMergePolicy)}
+          title="Import merge policy"
+          className={
+            "rounded border border-white/10 bg-[#1a1a22] px-2 py-1.5 text-sm text-[var(--ss-text)] outline-none focus:border-[var(--ss-accent)]"
+          }
+        >
+          <option value="skip">Skip duplicates</option>
+          <option value="overwrite">Overwrite</option>
+          <option value="rename">Rename</option>
+        </select>
         <button
           type="button"
           onClick={handleImport}
@@ -464,13 +551,55 @@ export function Manager() {
         >
           Import
         </button>
-        <button
-          type="button"
-          onClick={handleExport}
-          className="rounded border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-[var(--ss-text)] hover:bg-white/10"
-        >
-          Export
-        </button>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setExportOpen((v) => !v)}
+            className="rounded border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-[var(--ss-text)] hover:bg-white/10"
+          >
+            Export ▾
+          </button>
+          {exportOpen && (
+            <>
+              <div
+                className="fixed inset-0 z-40"
+                onClick={() => setExportOpen(false)}
+              />
+              <div className="absolute right-0 z-50 mt-1 min-w-[130px] rounded border border-white/10 bg-[#1a1a22] py-1 shadow-xl">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    void handleExport("json");
+                  }}
+                  className="block w-full px-3 py-1.5 text-left text-sm text-[var(--ss-text)] hover:bg-white/5"
+                >
+                  JSON
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    void handleExport("csv");
+                  }}
+                  className="block w-full px-3 py-1.5 text-left text-sm text-[var(--ss-text)] hover:bg-white/5"
+                >
+                  CSV
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setExportOpen(false);
+                    void handleExport("markdown");
+                  }}
+                  className="block w-full px-3 py-1.5 text-left text-sm text-[var(--ss-text)] hover:bg-white/5"
+                >
+                  Markdown
+                </button>
+              </div>
+            </>
+          )}
+        </div>
         <button
           type="button"
           onClick={() => setSettingsOpen((v) => !v)}
@@ -551,7 +680,38 @@ export function Manager() {
           </div>
         </main>
 
-        <section className="w-[340px] shrink-0 overflow-y-auto border-l border-white/10">
+        <section className="flex w-[340px] shrink-0 flex-col overflow-hidden border-l border-white/10">
+          <div className="flex shrink-0 border-b border-white/10">
+            <button
+              type="button"
+              onClick={() => {
+                setRightTab("snippets");
+                setSettingsOpen(false);
+              }}
+              className={
+                rightTab === "snippets" && !settingsOpen
+                  ? "flex-1 border-b-2 border-[var(--ss-accent)] px-3 py-2 text-sm font-medium text-[var(--ss-text)]"
+                  : "flex-1 border-b-2 border-transparent px-3 py-2 text-sm text-[var(--ss-text-dim)] hover:text-[var(--ss-text)]"
+              }
+            >
+              Snippets
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setRightTab("vault");
+                setSettingsOpen(false);
+              }}
+              className={
+                rightTab === "vault" && !settingsOpen
+                  ? "flex-1 border-b-2 border-[var(--ss-accent)] px-3 py-2 text-sm font-medium text-[var(--ss-text)]"
+                  : "flex-1 border-b-2 border-transparent px-3 py-2 text-sm text-[var(--ss-text-dim)] hover:text-[var(--ss-text)]"
+              }
+            >
+              Vault
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto">
           {settingsOpen ? (
             <div className="space-y-6 px-4 py-4">
               <h2 className="text-sm font-semibold">Settings</h2>
@@ -595,6 +755,37 @@ export function Manager() {
 
               <div>
                 <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--ss-text-dim)]">
+                  Clipboard history
+                </h3>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={clipboardEnabled}
+                    onChange={(e) => handleClipboardEnabled(e.target.checked)}
+                    className="h-4 w-4 accent-[var(--ss-accent)]"
+                  />
+                  Track clipboard history
+                </label>
+                <div className="mt-2 flex items-center gap-2">
+                  <span className="shrink-0 text-xs text-[var(--ss-text-dim)]">
+                    Max entries
+                  </span>
+                  <div className="flex-1">
+                    <input
+                      type="number"
+                      min={1}
+                      value={clipboardCap}
+                      onChange={(e) => handleClipboardCap(e.target.value)}
+                      className={inputCls}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <BackupsPanel onError={alertError} />
+
+              <div>
+                <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--ss-text-dim)]">
                   Variables
                 </h3>
                 <VariableCheatsheet />
@@ -608,6 +799,8 @@ export function Manager() {
                 Refresh snippets
               </button>
             </div>
+          ) : rightTab === "vault" ? (
+            <VaultPanel onError={alertError} />
           ) : (
             <div className="flex flex-col gap-4 px-4 py-4">
               <div className="flex items-center justify-between">
@@ -749,6 +942,7 @@ export function Manager() {
               </div>
             </div>
           )}
+          </div>
         </section>
       </div>
     </div>

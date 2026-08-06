@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { PasteMode } from "./types";
+import type {
+  BackupInfo,
+  ClipboardEntry,
+  PasteMode,
+  VaultItem,
+  VaultKind,
+} from "./types";
 
 function call<T>(cmd: string, message: string, args?: Record<string, unknown>): Promise<T> {
   return invoke<T>(cmd, args).catch((err: unknown) => {
@@ -70,4 +76,113 @@ export async function onPopupShown(cb: () => void): Promise<() => void> {
   } catch (err: unknown) {
     throw new Error(`Failed to listen for popup-shown: ${String(err)}`);
   }
+}
+
+export interface VaultInput {
+  title: string;
+  kind: VaultKind;
+  username: string | null;
+  secret: string;
+}
+
+export function vaultList(): Promise<VaultItem[]> {
+  return call("vault_list", "Failed to list vault items");
+}
+
+export function vaultCreate(input: VaultInput): Promise<VaultItem> {
+  return call("vault_create", "Failed to create vault item", { input });
+}
+
+export function vaultUpdate(id: string, input: VaultInput): Promise<VaultItem> {
+  return call("vault_update", "Failed to update vault item", { id, input });
+}
+
+export function vaultDelete(id: string): Promise<void> {
+  return call("vault_delete", "Failed to delete vault item", { id });
+}
+
+export function vaultRevealSecret(id: string): Promise<string> {
+  return call("vault_reveal_secret", "Failed to reveal secret", { id });
+}
+
+export function vaultCopySecret(id: string): Promise<void> {
+  return call("vault_copy_secret", "Failed to copy secret", { id });
+}
+
+export function vaultPasteUsername(id: string): Promise<void> {
+  return call("vault_paste_username", "Failed to paste username", { id });
+}
+
+export function vaultPasteSecret(id: string): Promise<void> {
+  return call("vault_paste_secret", "Failed to paste secret", { id });
+}
+
+export function clipboardGetEnabled(): Promise<boolean> {
+  return call("clipboard_get_enabled", "Failed to get clipboard history setting");
+}
+
+export function clipboardSetEnabled(enabled: boolean): Promise<void> {
+  return call("clipboard_set_enabled", "Failed to set clipboard history setting", {
+    enabled,
+  });
+}
+
+export function clipboardGetCap(): Promise<number> {
+  return call("clipboard_get_cap", "Failed to get clipboard history cap");
+}
+
+export function clipboardSetCap(cap: number): Promise<void> {
+  return call("clipboard_set_cap", "Failed to set clipboard history cap", { cap });
+}
+
+export function clipboardList(): Promise<ClipboardEntry[]> {
+  return call("clipboard_list", "Failed to list clipboard history");
+}
+
+export function clipboardDelete(id: string): Promise<void> {
+  return call("clipboard_delete", "Failed to delete clipboard entry", { id });
+}
+
+export function clipboardClear(): Promise<void> {
+  return call("clipboard_clear", "Failed to clear clipboard history");
+}
+
+export function clipboardTogglePin(id: string): Promise<void> {
+  return call("clipboard_toggle_pin", "Failed to toggle clipboard pin", { id });
+}
+
+export function clipboardPaste(id: string): Promise<void> {
+  return call("clipboard_paste", "Failed to paste clipboard entry", { id });
+}
+
+export async function onClipboardHistoryChanged(
+  cb: () => void
+): Promise<() => void> {
+  try {
+    return await listen("clipboard-history-changed", cb);
+  } catch (err: unknown) {
+    throw new Error(
+      `Failed to listen for clipboard-history-changed: ${String(err)}`
+    );
+  }
+}
+
+export function backupNow(): Promise<BackupInfo> {
+  return call("backup_now", "Failed to create backup");
+}
+
+export function backupList(): Promise<BackupInfo[]> {
+  return call("backup_list", "Failed to list backups");
+}
+
+export function backupRestore(path: string): Promise<void> {
+  return call("backup_restore", "Failed to restore backup", { path });
+}
+
+export function backupGetRetention(): Promise<number> {
+  return call("backup_get_retention", "Failed to get backup retention");
+}
+
+export function backupSetRetention(n: number): Promise<void> {
+  return call("backup_set_retention", "Failed to set backup retention", { n });
 }

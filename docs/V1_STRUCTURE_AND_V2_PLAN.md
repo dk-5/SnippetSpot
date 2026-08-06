@@ -33,6 +33,7 @@ C:\snippetshot\
 │   │
 │   ├── lib\                   # ── shared, framework-agnostic logic ──
 │   │   ├── types.ts           # Core types: Snippet, SnippetInput, Settings, SearchHit,
+│   │   │                      #   VaultItem, ClipboardEntry, BackupInfo, merge policy,
 │   │   │                      #   SNIPPET_TYPES, DEFAULT_CATEGORIES, DEFAULT_HOTKEY
 │   │   ├── search.ts          # SnippetIndex: uFuzzy filter + composite ranker
 │   │   │                      #   (favorites/exact/tags/recency/usage); browse mode
@@ -40,21 +41,33 @@ C:\snippetshot\
 │   │   ├── db.ts              # SQLite CRUD via tauri-plugin-sql (init/list/create/update/
 │   │   │                      #   delete/duplicate/recordUsage/import)
 │   │   ├── api.ts             # Typed wrappers over Tauri invoke() + event listeners
+│   │   │                      #   (onPopupShown, onClipboardHistoryChanged)
+│   │   ├── secrets.ts         # Pure maskSecret() (mask all but last 4 chars)
+│   │   ├── importExport.ts    # Pure CSV/Markdown export + planImport() merge policies
 │   │   ├── search.test.ts     # vitest: ranking + spec examples + 10k perf sanity
-│   │   └── variables.test.ts  # vitest: all placeholder rules
+│   │   ├── variables.test.ts  # vitest: all placeholder rules
+│   │   ├── secrets.test.ts    # vitest: masking rules
+│   │   └── importExport.test.ts  # vitest: CSV/Markdown export + merge policies
 │   │
 │   ├── popup\                 # ── launcher window (transparent, acrylic, always-on-top) ──
 │   │   └── Popup.tsx          # Search UI, highlighted results, keyboard nav, paste flow
-│   │                          #   (↑↓ / Enter / Esc / Ctrl+N / Ctrl+E / Del / Ctrl+F)
+│   │                          #   (↑↓ / Enter / Esc / Ctrl+N / Ctrl+E / Del / Ctrl+F);
+│   │                          #   vault items in results (u / s / c) and clipboard
+│   │                          #   history mode (Ctrl+Shift+H)
 │   │
 │   └── manager\               # ── management window (normal window) ──
-│       ├── Manager.tsx        # Layout: header, category sidebar, list, editor, settings
+│       ├── Manager.tsx        # Layout: header, Snippets/Vault tabs, list, editor,
+│       │                      #   settings (clipboard history, backups, import merge policy)
 │       ├── SnippetRow.tsx     # List row: title/preview/badges/favorite star/duplicate
 │       ├── HotkeyRecorder.tsx # Record-mode global hotkey capture + validation
-│       └── VariableCheatsheet.tsx  # Static reference for paste variables
+│       ├── VariableCheatsheet.tsx  # Static reference for paste variables
+│       ├── SecretField.tsx    # Masked secret input (Show/Hide toggle, Copy)
+│       ├── VaultPanel.tsx     # Vault list + create/edit form (title, kind, username, secret)
+│       └── BackupsPanel.tsx   # Retention setting, back-up-now, backup list with Restore
 │
 ├── src-tauri\                 # ── Rust backend ───────────────────────────────────────
-│   ├── Cargo.toml             # Rust deps + release profile (LTO, strip, opt-size)
+│   ├── Cargo.toml             # Rust deps (windows crypto, rusqlite bundled) + release
+│   │                          #   profile (LTO, strip, opt-size)
 │   ├── build.rs               # tauri-build (embedded assets/context)
 │   ├── tauri.conf.json        # App config: productName, 2 windows, CSP, NSIS bundling
 │   ├── capabilities\default.json  # Plugin permissions (sql/store/clipboard/autostart)
@@ -62,13 +75,22 @@ C:\snippetshot\
 │   ├── src\
 │   │   ├── main.rs            # Entry → snippetspot_lib::run()
 │   │   ├── lib.rs             # Builder: plugins, window effects, tray, centering,
-│   │   │                      #   hide-on-blur, all 16 Tauri commands
-│   │   ├── migrate.rs         # SQLite migrations (snippets table + 4 indexes)
+│   │   │                      #   hide-on-blur, ~38 Tauri commands; starts clipboard
+│   │   │                      #   watcher + startup backup in setup()
+│   │   ├── migrate.rs         # SQLite migrations (v1 snippets; v3 vault_items +
+│   │   │                      #   clipboard_entries tables + indexes)
 │   │   ├── hotkey.rs          # WH_KEYBOARD_LL global hook (dedicated thread + msg loop),
 │   │   │                      #   parse_hotkey(), AtomicU32 combo state
 │   │   ├── paste.rs           # paste mode (clipboard save → Ctrl+V → restore ~300ms)
 │   │   │                      #   / type mode (KEYEVENTF_UNICODE)
-│   │   └── variables.rs       # Rust-side variable expansion (authoritative at paste time)
+│   │   ├── variables.rs       # Rust-side variable expansion (authoritative at paste time)
+│   │   ├── secrets.rs         # Windows DPAPI encrypt/decrypt (user scope) +
+│   │   │                      #   looks_like_secret pattern detection
+│   │   ├── vault.rs           # Vault CRUD (credentials + API keys); secrets only exit
+│   │   │                      #   via explicit reveal/copy/paste commands
+│   │   ├── clipboard.rs       # Background history watcher (poll arboard 500ms, dedupe,
+│   │   │                      #   skip secrets/self-writes) → clipboard-history-changed
+│   │   └── backup.rs          # Timestamped DB + settings backups (auto on start, keep 10)
 │   └── gen\                   # Generated schemas (capabilities) — do not edit
 │
 ├── scripts\
@@ -84,68 +106,122 @@ C:\snippetshot\
 
 | File | What it does |
 | --- | --- |
-| `src/lib/types.ts` | Single source of truth for `Snippet`, `SnippetInput`, `Settings`, `SearchHit`, category/type constants. Both windows and both sides (TS/Rust via JS) depend on these shapes. |
+| `src/lib/types.ts` | Single source of truth for `Snippet`, `SnippetInput`, `Settings`, `SearchHit`, `VaultItem`, `ClipboardEntry`, `BackupInfo`, `ImportMergePolicy`, category/type constants. Both windows and both sides (TS/Rust via JS) depend on these shapes. |
 | `src/lib/search.ts` | Builds a lowercase haystack per snippet; `uFuzzy` filters; a deterministic composite score ranks favorites, exact/starts-with title matches, tag/category hits, recency and usage. Empty query = browse favorites-first. Tested for the spec examples (`li`→LinkedIn, etc.). |
 | `src/lib/variables.ts` | Pure `expandVariables()` — mirrors the Rust rules exactly so previews match paste output. |
 | `src/lib/db.ts` | Singleton `tauri-plugin-sql` connection to `sqlite:snippetspot.db`; maps SQL rows ↔ `Snippet` (JSON tags, 0/1 favorite, ISO dates); generates UUID v4 ids + timestamps. |
-| `src/lib/api.ts` | Every `invoke()` name the frontend uses, typed, plus `onPopupShown` event subscription. The contract the Rust commands implement. |
-| `src/popup/Popup.tsx` | The launcher: auto-focus search, `SnippetIndex`-driven results with `<mark>` highlighting, full keyboard handling, paste flow (`pasteSnippet` → `recordUsage` → rebuild index), Ctrl+N/E bridge to the manager via `localStorage.ss_edit_target`. |
-| `src/manager/Manager.tsx` | CRUD + categories + import/export JSON + settings. Filters by category using `SnippetIndex` over the subset; editor validates and persists; settings panel wires hotkey/paste-mode/autostart. |
+| `src/lib/api.ts` | Every `invoke()` name the frontend uses, typed, plus `onPopupShown` and `onClipboardHistoryChanged` event subscriptions. The contract the ~38 Rust commands implement. |
+| `src/popup/Popup.tsx` | The launcher: auto-focus search, `SnippetIndex`-driven results with `<mark>` highlighting, full keyboard handling, paste flow (`pasteSnippet` → `recordUsage` → rebuild index), Ctrl+N/E bridge to the manager via `localStorage.ss_edit_target`. Vault items appear in results (title + username, masked badge, never the secret) with `u`/`s`/`c` actions; `Ctrl+Shift+H` toggles clipboard-history mode (live via the event). |
+| `src/manager/Manager.tsx` | CRUD + categories + import/export + settings. Snippets/Vault tab strip; import has a merge-policy select (skip/overwrite/rename) with a summary alert (imported/updated/skipped); export dropdown offers JSON, CSV, Markdown; settings wire hotkey, paste mode, clipboard history, backups. |
 | `src-tauri/src/hotkey.rs` | Low-level `WH_KEYBOARD_LL` hook on its own thread (like PowerToys Run) so `Alt+Space` fires reliably and <100ms. `AtomicU32` holds the current (mods, vk); a channel triggers `show_popup`. |
 | `src-tauri/src/paste.rs` | Paste mode: save clipboard → write snippet → `SendInput` Ctrl+V → restore after ~300ms (best-effort text preservation). Type mode: Unicode key events, clipboard untouched. |
 | `src-tauri/src/variables.rs` | Same expansion rules as TS, run in Rust at paste time (can read the live clipboard / env vars). |
-| `src-tauri/src/migrate.rs` | Versioned `Migration` structs registered on `sqlite:snippetspot.db`. |
-| `src-tauri/src/lib.rs` | Wires everything: plugins (single-instance, store, sql, dialog, fs, autostart, clipboard-manager), Acrylic→Blur window effects, cursor-monitor centering, hide-on-focus-loss, tray menu, and 16 commands. |
+| `src-tauri/src/migrate.rs` | Versioned `Migration` structs on `sqlite:snippetspot.db` — v1 `snippets`, v3 `vault_items` + `clipboard_entries` tables (+ indexes). v2 unchanged. |
+| `src-tauri/src/lib.rs` | Wires everything: plugins (single-instance, store, sql, dialog, fs, autostart, clipboard-manager), Acrylic→Blur window effects, cursor-monitor centering, hide-on-focus-loss, tray menu, and ~38 commands. `setup()` starts the clipboard watcher and a startup backup; Settings adds `clipboard_history_enabled`, `clipboard_history_cap`, `backup_retention`; `paste.rs` marks app clipboard writes so history suppresses them. |
+| `src-tauri/src/secrets.rs` | Windows DPAPI (`CryptProtectData`/`CryptUnprotectData`, user scope) `encrypt_secret`/`decrypt_secret`; `looks_like_secret` detects API-key/password patterns (sk-, ghp_, AIza, private-key headers). |
+| `src-tauri/src/vault.rs` | CRUD for `vault_items` (credentials + API keys); secrets stay DPAPI-encrypted and only leave via explicit `reveal_secret`/`copy_secret`/`paste_*` commands. |
+| `src-tauri/src/clipboard.rs` | Background watcher thread (poll `arboard` 500ms, dedupe consecutive, skip empty/oversized/likely-secrets, ~1s suppression of app self-writes); cap 500 entries, prune older than 7 days; emits `clipboard-history-changed`. |
+| `src-tauri/src/backup.rs` | Timestamped backups of the SQLite DB + settings.json into `<app_config_dir>/backups/`; auto on start (skips within the same minute), keeps newest 10; restore copies over the live DB (restart required). |
+| `src/lib/secrets.ts` | Pure `maskSecret()` — masks everything but the last 4 characters of a secret. |
+| `src/lib/importExport.ts` | Pure `snippetsToCsv()`, `snippetsToMarkdown()`, and `planImport()` (merge policy: skip/overwrite/rename on normalized title). |
+| `src/manager/SecretField.tsx` | Masked secret input with Show/Hide toggle and Copy ("(blank = keep current)"). |
+| `src/manager/VaultPanel.tsx` | Vault list + create/edit form (title, kind credential/api_key, username, secret). |
+| `src/manager/BackupsPanel.tsx` | Retention setting, "Back up now", backup list with Restore. |
 
-### Runtime data (v1)
+### Runtime data
 
-- **DB:** `%APPDATA%\com.snippetspot.app\snippetspot.db`
-- **Settings:** `%APPDATA%\com.snippetspot.app\settings.json` (`hotkey`, `paste_mode`)
-- **Backups:** via Manager → Export JSON.
+- **DB:** `%APPDATA%\com.snippetspot.app\snippetspot.db` (tables: `snippets`, `vault_items`, `clipboard_entries`)
+- **Settings:** `%APPDATA%\com.snippetspot.app\settings.json` (`hotkey`, `paste_mode`, `clipboard_history_enabled`, `clipboard_history_cap`, `backup_retention`)
+- **Backups:** `%APPDATA%\com.snippetspot.app\backups\` (automatic on app start, keeps newest 10)
 
 ---
 
-## 4. v2 Plan
+## 4. v2 (shipped)
 
-### 4.1 Goals
+v2 shipped as SnippetSpot 0.1.0 (Windows-only) on the same foundation — Tauri 2 +
+React 19 + TypeScript + Tailwind v4 + SQLite (`tauri-plugin-sql`). The three
+high-priority backlog features were delivered with ~22 new Rust commands (~38 total).
 
-Keep the v1 foundation; add the deferred features plus high-value polish. v2 targets
-**same architecture** (Tauri + SQLite + in-memory search) so most changes are additive.
+### 4.1 Secure vault
 
-### 4.2 Feature backlog (prioritized)
+- New `vault_items` table (UUID id, title, kind `credential|api_key`, username,
+  `secret_enc` BLOB, timestamps) via migration v3.
+- Secrets are encrypted with **Windows DPAPI (user scope)** before hitting the DB —
+  never stored plaintext.
+- Commands: `vault_list` / `create` / `update` / `delete` / `reveal_secret` /
+  `copy_secret` / `paste_username` / `paste_secret`. Secrets are never returned to the
+  frontend except via explicit reveal/copy/paste.
+- Manager **Vault** tab: masked `SecretField` (Show/Hide + Copy, "(blank = keep
+  current)") and `VaultPanel` list + create/edit form.
+- Popup: vault items appear in search results (title + username, masked "••••" badge,
+  never the secret). Select one and press **u** (username), **s** (secret), or **c**
+  (copy).
+
+### 4.2 Clipboard history
+
+- `src-tauri/src/clipboard.rs`: background watcher thread polls `arboard` every 500ms,
+  dedupes consecutive identical entries, skips empty / >5000-char / likely-secret
+  content, and suppresses capture for ~1s after the app itself writes the clipboard.
+- New `clipboard_entries` table (content, created_at, pinned). Cap 500 entries, prune
+  older than 7 days. Emits `clipboard-history-changed` for live refresh.
+- Commands: `clipboard_get_enabled` / `set_enabled` / `get_cap` / `set_cap` / `list` /
+  `delete` / `clear` / `toggle_pin` / `paste`.
+- Popup: `Ctrl+Shift+H` toggles history mode — Enter paste, Del delete, P pin, Esc exit,
+  Clear button.
+
+### 4.3 Import/export v2 + backups
+
+- Export now offers **JSON, CSV, and Markdown** (`snippetsToCsv()` /
+  `snippetsToMarkdown()`); export dropdown in the manager.
+- Import has a **merge-policy select** — skip / overwrite / rename on normalized title
+  (`planImport()`) — with a summary alert (imported / updated / skipped).
+- `src-tauri/src/backup.rs`: timestamped backups of the SQLite DB + settings.json into
+  `<app_config_dir>/backups/`; automatic at every app start (skips if one exists within
+  the same minute), keeps the newest 10 by default. Restore copies a backup over the
+  live DB (app restart required). Manager **Backups** panel: retention setting, "Back
+  up now", backup list with Restore.
+
+### 4.4 Security model
+
+- Passwords and API keys are never stored in plaintext (DPAPI user-scope encryption),
+  never shown in plaintext in the UI (masked; reveal is transient), never included in
+  search indexes, and never included in JSON/CSV/Markdown exports. Vault items are never
+  imported from files.
+- DPAPI blobs are bound to the Windows user + machine — a backup moved to another
+  machine cannot decrypt its secrets.
+- Snippet content itself is **not** encrypted (lock-only design).
+
+### 4.5 Test coverage
+
+- `cargo test`: 23 passed · `vitest`: 57 passed (4 files) · `tsc` clean.
+
+---
+
+## 5. v2.1+ Backlog
+
+Deferred ideas from the original v2 plan, still future work:
 
 | Priority | Feature | Approach |
 | --- | --- | --- |
-| P0 | **AI semantic search** | Local embeddings (on-device, no cloud). Embed each snippet with a small model (e.g. `@huggingface/transformers` + MiniLM, WASM/WebGPU); store vectors in a new `embeddings` table (or JSON column); one-time background embedding job + incremental on CRUD. Hybrid ranker: fuzzy score + cosine similarity; natural-language queries ("my email", "github profile") route to the top by semantic match. Schema is already additive (`ALTER TABLE snippets ADD COLUMN embedding …` migration or separate table) — no breaking change. |
-| P0 | **Clipboard history** | Continuous clipboard polling (e.g. every 500ms) in Rust; new `clipboard_entries` table; "history" mode in the popup (a second result mode toggled by a key, e.g. `Ctrl+Shift+H`); paste a history entry like a snippet; search history too. Optional: pin favorites / copy-not-paste actions. |
+| P0 | **AI semantic search** | Local embeddings (on-device, no cloud). Embed each snippet with a small model (e.g. `@huggingface/transformers` + MiniLM, WASM/WebGPU); store vectors in a new `embeddings` table (or JSON column); one-time background embedding job + incremental on CRUD. Hybrid ranker: fuzzy score + cosine similarity; natural-language queries ("my email", "github profile") route to the top by semantic match. Additive schema change — no breaking rewrite. |
 | P1 | **Variable expansion UI** | Live preview of `{{date}}`/`{{clipboard}}` in the manager editor; custom date/time formats (`{{date:YYYY-MM}}`); multiline-friendly placeholders; "insert variable" picker in the content textarea. |
-| P1 | **Settings polish** | Paste-mode per snippet (override global); per-snippet "type" toggle; default category/type preferences; appearance (window width, theme accent, blur strength). |
-| P1 | **Import/Export v2** | CSV + Markdown export; import merge policy (skip duplicates by title, overwrite, or rename); automatic timestamped backups on app start. |
-| P1 | **Backup/restore** | Copy/restore the SQLite file from the manager; optional encrypted backup (AES-GCM, local key). |
+| P1 | **Settings/appearance polish** | Paste-mode per snippet (override global); per-snippet "type" toggle; default category/type preferences; appearance (window width, theme accent, blur strength). |
 | P2 | **macOS/Linux support** | Hotkey layer already isolated in `hotkey.rs` — abstract into a trait; swap `SendInput`/hook per platform (`global-hotkey` crate or platform APIs); conditional window effects (`NSVisualEffect` on macOS). Keep `#[cfg(target_os)]` seams. |
 | P2 | **Search quality** | Multi-token queries (AND of terms), typo tolerance tuning, per-field weights, category+tag filters in the popup, persistent per-query "did you mean" from usage data. |
 | P2 | **System integration** | Auto-update (`tauri-plugin-updater`), code signing, multi-monitor DPI handling, click-through shadow improvements, per-monitor remembering of last position. |
 | P3 | **Snippet sharing** | Export a single snippet as a shareable `.json`/gist-style file; optional local-network sync (LAN-only, still no cloud). |
 | P3 | **Power features** | Scriptable snippets (run command/script output as paste), nested/variable templates with prompts, snippet groups/folders, bulk tagging UI, keyboard-first manager navigation. |
 
-### 4.3 Architecture changes for v2
+### 5.1 v2.1+ release checklist
 
-1. **Search abstraction** — introduce a `SearchProvider` interface: `FuzzySearch`, and later `SemanticSearch` + `HybridSearch`. The popup stays unchanged behind the interface.
-2. **Embedding pipeline** — Rust command `ensure_embeddings()` runs a background job (progress events → manager UI); model cached in `app_data_dir`; vectors stored per-snippet with a model-version column so re-embedding is automatic on model upgrade.
-3. **Clipboard watcher** — new `src-tauri/src/clipboard.rs` thread; a toggle in settings + tray; dedupe consecutive identical entries; cap stored entries (e.g. 500).
-4. **Settings model** — migrate `settings.json` toward typed, schema'd settings with migration-on-load (fall back to defaults) instead of ad-hoc keys; expose a typed settings API to both windows.
-5. **Database migrations** — continue `migrate.rs` versioning (v2 adds `embeddings`/`clipboard_entries` tables + any indexes). No schema rewrites.
-
-### 4.4 v2 release checklist
-
+- [x] Clipboard watcher + history UI tests (shipped in v2)
+- [x] Update README + this document (shipped in v2)
 - [ ] Embedding model size/accuracy benchmark on 10k snippets (memory, latency, cold start)
 - [ ] Hybrid ranking regression tests (existing vitest suite extended)
-- [ ] Clipboard watcher + history UI tests
 - [ ] macOS/Linux CI build (if P2 scope confirmed)
 - [ ] Signed installer + updater channel
-- [ ] Update README + this document
 
-### 4.5 Out of scope for v2 (unless requested)
+### 5.2 Out of scope (unless requested)
 
 - Cloud sync / accounts
 - Natural-language *generation* (only retrieval/search)

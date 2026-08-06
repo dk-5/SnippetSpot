@@ -1,15 +1,22 @@
+mod backup;
+mod clipboard;
 mod hotkey;
 mod migrate;
 mod paste;
+mod secrets;
 mod variables;
+mod vault;
 
 use std::sync::Mutex;
 
 use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize};
 
-struct Settings {
-    hotkey: Mutex<String>,
-    paste_mode: Mutex<String>,
+pub(crate) struct Settings {
+    pub(crate) hotkey: Mutex<String>,
+    pub(crate) paste_mode: Mutex<String>,
+    pub(crate) clipboard_enabled: Mutex<bool>,
+    pub(crate) clipboard_cap: Mutex<usize>,
+    pub(crate) backup_retention: Mutex<u32>,
 }
 
 const DEFAULT_HOTKEY: &str = "Alt+Space";
@@ -40,9 +47,20 @@ pub fn run() {
             let settings = load_settings(&handle);
             let hotkey = settings.hotkey.lock().unwrap().clone();
             let paste_mode = settings.paste_mode.lock().unwrap().clone();
+            let clipboard_enabled = *settings.clipboard_enabled.lock().unwrap();
+            let clipboard_cap = *settings.clipboard_cap.lock().unwrap();
+            let backup_retention = *settings.backup_retention.lock().unwrap();
             handle.manage(Settings {
                 hotkey: Mutex::new(hotkey.clone()),
                 paste_mode: Mutex::new(paste_mode),
+                clipboard_enabled: Mutex::new(clipboard_enabled),
+                clipboard_cap: Mutex::new(clipboard_cap),
+                backup_retention: Mutex::new(backup_retention),
+            });
+            handle.manage(clipboard::ClipboardState {
+                enabled: Mutex::new(clipboard_enabled),
+                cap: Mutex::new(clipboard_cap),
+                last_app_write: Mutex::new(std::time::Instant::now()),
             });
 
             apply_window_effects(&handle);
@@ -54,6 +72,9 @@ pub fn run() {
             if let Err(e) = build_tray(&handle) {
                 eprintln!("[snippetspot] failed to build tray: {e}");
             }
+
+            clipboard::start_watcher(handle.clone());
+            backup::run_startup_backup(&handle);
 
             Ok(())
         })
@@ -87,6 +108,28 @@ pub fn run() {
             write_text_file,
             quit_app,
             get_app_version,
+            vault::vault_list,
+            vault::vault_create,
+            vault::vault_update,
+            vault::vault_delete,
+            vault::vault_reveal_secret,
+            vault::vault_copy_secret,
+            vault::vault_paste_username,
+            vault::vault_paste_secret,
+            clipboard::clipboard_get_enabled,
+            clipboard::clipboard_set_enabled,
+            clipboard::clipboard_get_cap,
+            clipboard::clipboard_set_cap,
+            clipboard::clipboard_list,
+            clipboard::clipboard_delete,
+            clipboard::clipboard_clear,
+            clipboard::clipboard_toggle_pin,
+            clipboard::clipboard_paste,
+            backup::backup_now,
+            backup::backup_list,
+            backup::backup_restore,
+            backup::backup_get_retention,
+            backup::backup_set_retention,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -196,6 +239,9 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
             return Settings {
                 hotkey: Mutex::new(DEFAULT_HOTKEY.to_string()),
                 paste_mode: Mutex::new(DEFAULT_PASTE_MODE.to_string()),
+                clipboard_enabled: Mutex::new(clipboard::DEFAULT_CLIPBOARD_HISTORY_ENABLED),
+                clipboard_cap: Mutex::new(clipboard::DEFAULT_CLIPBOARD_HISTORY_CAP),
+                backup_retention: Mutex::new(backup::DEFAULT_BACKUP_RETENTION),
             };
         }
     };
@@ -208,6 +254,18 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
         .get("paste_mode")
         .and_then(|v| v.as_str().map(str::to_string))
         .unwrap_or_else(|| DEFAULT_PASTE_MODE.to_string());
+    let clipboard_enabled = store
+        .get("clipboard_history_enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(clipboard::DEFAULT_CLIPBOARD_HISTORY_ENABLED);
+    let clipboard_cap = store
+        .get("clipboard_history_cap")
+        .and_then(|v| v.as_u64().map(|n| n as usize))
+        .unwrap_or(clipboard::DEFAULT_CLIPBOARD_HISTORY_CAP);
+    let backup_retention = store
+        .get("backup_retention")
+        .and_then(|v| v.as_u64().map(|n| n as u32))
+        .unwrap_or(backup::DEFAULT_BACKUP_RETENTION);
 
     let mut changed = false;
     if store.get("hotkey").is_none() {
@@ -216,6 +274,18 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
     }
     if store.get("paste_mode").is_none() {
         store.set("paste_mode", DEFAULT_PASTE_MODE);
+        changed = true;
+    }
+    if store.get("clipboard_history_enabled").is_none() {
+        store.set("clipboard_history_enabled", clipboard::DEFAULT_CLIPBOARD_HISTORY_ENABLED);
+        changed = true;
+    }
+    if store.get("clipboard_history_cap").is_none() {
+        store.set("clipboard_history_cap", clipboard::DEFAULT_CLIPBOARD_HISTORY_CAP);
+        changed = true;
+    }
+    if store.get("backup_retention").is_none() {
+        store.set("backup_retention", backup::DEFAULT_BACKUP_RETENTION);
         changed = true;
     }
     if changed {
@@ -227,6 +297,9 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
     Settings {
         hotkey: Mutex::new(hotkey),
         paste_mode: Mutex::new(paste_mode),
+        clipboard_enabled: Mutex::new(clipboard_enabled),
+        clipboard_cap: Mutex::new(clipboard_cap),
+        backup_retention: Mutex::new(backup_retention),
     }
 }
 
@@ -247,12 +320,54 @@ fn set_setting(app: &AppHandle, key: &str, value: &str) -> Result<(), String> {
     store.save().map_err(|e| e.to_string())
 }
 
-fn current_paste_mode(app: &AppHandle) -> String {
+pub(crate) fn current_paste_mode(app: &AppHandle) -> String {
     if let Some(state) = app.try_state::<Settings>() {
         state.paste_mode.lock().unwrap().clone()
     } else {
         get_setting(app, "paste_mode").unwrap_or_else(|| DEFAULT_PASTE_MODE.to_string())
     }
+}
+
+pub(crate) fn app_db_path(app: &AppHandle) -> std::path::PathBuf {
+    app.path()
+        .app_config_dir()
+        .map(|d| d.join("snippetspot.db"))
+        .unwrap_or_default()
+}
+
+pub(crate) fn open_db(app: &AppHandle) -> Result<rusqlite::Connection, String> {
+    let path = app_db_path(app);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let conn = rusqlite::Connection::open(&path).map_err(|e| e.to_string())?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .map_err(|e| e.to_string())?;
+    conn.busy_timeout(std::time::Duration::from_millis(5000))
+        .map_err(|e| e.to_string())?;
+    Ok(conn)
+}
+
+pub(crate) fn now_iso() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+}
+
+pub(crate) fn get_setting_value(app: &AppHandle, key: &str) -> Option<serde_json::Value> {
+    use tauri_plugin_store::StoreExt;
+
+    app.store("settings.json").ok()?.get(key)
+}
+
+pub(crate) fn set_setting_value(
+    app: &AppHandle,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<(), String> {
+    use tauri_plugin_store::StoreExt;
+
+    let store = app.store("settings.json").map_err(|e| e.to_string())?;
+    store.set(key, value);
+    store.save().map_err(|e| e.to_string())
 }
 
 #[tauri::command]

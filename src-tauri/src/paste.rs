@@ -11,6 +11,7 @@ pub fn paste_text(app: &AppHandle, text: &str, mode: &str) {
         "type" => type_text(text),
         _ => paste_via_clipboard(text),
     }
+    crate::clipboard::mark_app_clipboard_write(app);
 }
 
 fn paste_via_clipboard(text: &str) {
