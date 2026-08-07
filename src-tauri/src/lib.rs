@@ -180,6 +180,7 @@ pub fn run() {
                 });
             }
 
+            autostart_reorder_if_needed();
             startup_log(&handle, "setup done");
 
             Ok(())
@@ -663,22 +664,73 @@ fn autostart_enabled() -> bool {
 }
 
 fn autostart_set(enabled: bool) -> Result<(), String> {
-    use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE};
-    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_CREATE_SUB_KEY, KEY_QUERY_VALUE, KEY_SET_VALUE};
+    use winreg::{RegKey, RegValue};
 
-    let key = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags(AUTOSTART_RUN_KEY, KEY_QUERY_VALUE | KEY_SET_VALUE)
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey_with_flags(
+            AUTOSTART_RUN_KEY,
+            KEY_QUERY_VALUE | KEY_SET_VALUE | KEY_CREATE_SUB_KEY,
+        )
+        .or_else(|_| hkcu.create_subkey(AUTOSTART_RUN_KEY).map(|(k, _)| k))
         .map_err(|e| e.to_string())?;
     if enabled {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        key.set_value(AUTOSTART_VALUE, &format!("\"{}\"", exe.display()))
-            .map_err(|e| e.to_string())
+        let value = format!("\"{}\"", exe.display());
+
+        let mut entries: Vec<(String, RegValue)> = key
+            .enum_values()
+            .collect::<Result<_, _>>()
+            .map_err(|e| e.to_string())?;
+
+        let already_first = entries
+            .first()
+            .map(|(name, _)| name == AUTOSTART_VALUE)
+            .unwrap_or(false);
+        let value_ok = key
+            .get_value::<String, _>(AUTOSTART_VALUE)
+            .map(|v| v == value)
+            .unwrap_or(false);
+        if already_first && value_ok {
+            return Ok(());
+        }
+
+        // Rewrite the key so SnippetSpot is launched first, preserving every
+        // other app's entry (and its value type) in the original order.
+        entries.retain(|(name, _)| name != AUTOSTART_VALUE);
+        for (name, _) in &entries {
+            let _ = key.delete_value(name);
+        }
+        key.set_value(AUTOSTART_VALUE, &value).map_err(|e| e.to_string())?;
+        for (name, reg_value) in entries {
+            key.set_raw_value(name, &reg_value).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     } else {
         match key.delete_value(AUTOSTART_VALUE) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+fn autostart_reorder_if_needed() {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let Ok(key) = RegKey::predef(HKEY_CURRENT_USER).open_subkey(AUTOSTART_RUN_KEY) else {
+        return;
+    };
+    let Ok(stored) = key.get_value::<String, _>(AUTOSTART_VALUE) else {
+        return;
+    };
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    if stored == format!("\"{}\"", exe.display()) {
+        let _ = autostart_set(true);
     }
 }
 
