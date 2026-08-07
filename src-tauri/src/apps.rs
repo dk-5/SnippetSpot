@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 pub struct AppsState {
     pub items: Mutex<Vec<AppItem>>,
@@ -13,27 +13,131 @@ pub struct AppItem {
     pub path: String,
 }
 
+const UWP_CACHE_FRESH_SECS: u64 = 24 * 60 * 60;
+
 pub fn start_enumeration(app: AppHandle) {
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(1500));
-        let items = enumerate_apps();
+        let base = enumerate_apps_base();
+        let (cached_uwp, fresh) = load_uwp_cache(&app);
+        let mut items = base.clone();
+        items.extend(cached_uwp);
+        let items = dedupe_and_sort(items);
         if let Some(state) = app.try_state::<AppsState>() {
-            let mut guard = state.items.lock().unwrap();
-            if guard.is_empty() {
-                *guard = items;
-            }
+            *state.items.lock().unwrap() = items.clone();
         }
+        save_cache(&app, &items);
+        crate::startup_log(&app, &format!("apps enumerated: {} items", items.len()));
+        let _ = app.emit("apps-changed", ());
+
+        if fresh {
+            return;
+        }
+        let fresh_uwp = enumerate_apps_uwp();
+        save_uwp_cache(&app, &fresh_uwp);
+        let mut all = base;
+        all.extend(fresh_uwp);
+        let all = dedupe_and_sort(all);
+        if let Some(state) = app.try_state::<AppsState>() {
+            *state.items.lock().unwrap() = all.clone();
+        }
+        save_cache(&app, &all);
+        crate::startup_log(&app, &format!("apps refreshed (uwp): {} items", all.len()));
+        let _ = app.emit("apps-changed", ());
     });
 }
 
 #[tauri::command]
 pub fn app_list(app: AppHandle) -> Vec<AppItem> {
     let items = if let Some(state) = app.try_state::<AppsState>() {
-        state.items.lock().unwrap().clone()
+        let mut guard = state.items.lock().unwrap();
+        if guard.is_empty() {
+            let cached = load_cache(&app);
+            if !cached.is_empty() {
+                *guard = cached;
+            }
+        }
+        guard.clone()
     } else {
         Vec::new()
     };
     filter_and_limit(&items, "", usize::MAX)
+}
+
+fn cache_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("apps.json"))
+}
+
+#[derive(Serialize, Deserialize)]
+struct UwpCache {
+    timestamp: u64,
+    items: Vec<AppItem>,
+}
+
+fn uwp_cache_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path().app_config_dir().ok().map(|d| d.join("uwp.json"))
+}
+
+fn load_uwp_cache(app: &AppHandle) -> (Vec<AppItem>, bool) {
+    let Some(path) = uwp_cache_path(app) else {
+        return (Vec::new(), false);
+    };
+    let Ok(json) = std::fs::read_to_string(path) else {
+        return (Vec::new(), false);
+    };
+    let Ok(cache) = serde_json::from_str::<UwpCache>(&json) else {
+        return (Vec::new(), false);
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let fresh = now.saturating_sub(cache.timestamp) < UWP_CACHE_FRESH_SECS;
+    (cache.items, fresh)
+}
+
+fn save_uwp_cache(app: &AppHandle, items: &[AppItem]) {
+    let Some(path) = uwp_cache_path(app) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let cache = UwpCache {
+        timestamp: now,
+        items: items.to_vec(),
+    };
+    if let Ok(json) = serde_json::to_string(&cache) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
+fn load_cache(app: &AppHandle) -> Vec<AppItem> {
+    let Some(path) = cache_path(app) else {
+        return Vec::new();
+    };
+    match std::fs::read_to_string(path) {
+        Ok(json) => serde_json::from_str(&json).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn save_cache(app: &AppHandle, items: &[AppItem]) {
+    let Some(path) = cache_path(app) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match serde_json::to_string(items) {
+        Ok(json) => {
+            let _ = std::fs::write(path, json);
+        }
+        Err(_) => {}
+    }
 }
 
 #[tauri::command]
@@ -106,12 +210,17 @@ mod imp {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     use winreg::RegKey;
 
-    pub fn enumerate_apps() -> Vec<AppItem> {
+    pub fn enumerate_apps_base() -> Vec<AppItem> {
         let mut items = Vec::new();
         collect_start_menu(&mut items);
         collect_registry(&mut items);
-        collect_uwp(&mut items);
         dedupe_and_sort(items)
+    }
+
+    pub fn enumerate_apps_uwp() -> Vec<AppItem> {
+        let mut items = Vec::new();
+        collect_uwp(&mut items);
+        items
     }
 
     fn collect_uwp(items: &mut Vec<AppItem>) {
@@ -239,7 +348,11 @@ mod imp {
 mod imp {
     use super::*;
 
-    pub fn enumerate_apps() -> Vec<AppItem> {
+    pub fn enumerate_apps_base() -> Vec<AppItem> {
+        Vec::new()
+    }
+
+    pub fn enumerate_apps_uwp() -> Vec<AppItem> {
         Vec::new()
     }
 

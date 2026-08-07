@@ -18,6 +18,7 @@ import {
   clipboardPaste,
   clipboardTogglePin,
   hidePopup,
+  onAppsChanged,
   onClipboardHistoryChanged,
   onPopupShown,
   openManager,
@@ -183,6 +184,7 @@ export function Popup() {
     refreshClipboard();
     let unlistenPopup: (() => void) | null = null;
     let unlistenClipboard: (() => void) | null = null;
+    let unlistenApps: (() => void) | null = null;
     onPopupShown(() => {
       setQuery("");
       setSelected(0);
@@ -202,6 +204,13 @@ export function Popup() {
     onClipboardHistoryChanged(() => refreshClipboard()).then((fn) => {
       unlistenClipboard = fn;
     });
+    onAppsChanged(() => {
+      appList()
+        .then(setApps)
+        .catch(() => {});
+    }).then((fn) => {
+      unlistenApps = fn;
+    });
     const readyTimer = window.setTimeout(() => {
       emit("popup-ready").catch(() => {});
     }, 120);
@@ -210,6 +219,7 @@ export function Popup() {
       window.clearTimeout(appRefreshTimer);
       unlistenPopup?.();
       unlistenClipboard?.();
+      unlistenApps?.();
     };
   }, [refresh, refreshClipboard]);
 

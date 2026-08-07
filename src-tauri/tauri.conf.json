@@ -24,16 +24,6 @@
         "resizable": false,
         "shadow": true,
         "center": true
-      },
-      {
-        "label": "manager",
-        "title": "SnippetSpot",
-        "width": 920,
-        "height": 640,
-        "minWidth": 680,
-        "minHeight": 480,
-        "visible": false,
-        "center": true
       }
     ],
     "security": {

@@ -97,6 +97,14 @@ export async function onPopupShown(cb: () => void): Promise<() => void> {
   }
 }
 
+export async function onAppsChanged(cb: () => void): Promise<() => void> {
+  try {
+    return await listen("apps-changed", cb);
+  } catch (err: unknown) {
+    throw new Error(`Failed to listen for apps-changed: ${String(err)}`);
+  }
+}
+
 export interface VaultInput {
   title: string;
   kind: VaultKind;

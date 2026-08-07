@@ -9,9 +9,59 @@ mod variables;
 mod vault;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use tauri::{AppHandle, Emitter, Listener, Manager, PhysicalPosition, PhysicalSize};
+
+static START_TIME: OnceLock<std::time::Instant> = OnceLock::new();
+
+fn process_started_local() -> Option<String> {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    unsafe {
+        let mut creation = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        if GetProcessTimes(
+            GetCurrentProcess(),
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+        .is_ok()
+        {
+            let ft =
+                ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+            let unix_secs = (ft / 10_000_000).saturating_sub(11_644_473_600) as i64;
+            if let Some(dt) = chrono::DateTime::from_timestamp(unix_secs, 0) {
+                return Some(
+                    dt.with_timezone(&chrono::Local).format("%H:%M:%S").to_string(),
+                );
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn startup_log(app: &AppHandle, msg: &str) {
+    use std::io::Write;
+
+    let ms = START_TIME
+        .get()
+        .map(|t| t.elapsed().as_millis())
+        .unwrap_or(0);
+    if let Ok(dir) = app.path().app_config_dir() {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("startup.log"))
+        {
+            let _ = writeln!(f, "+{ms}ms {msg}");
+        }
+    }
+}
 
 pub(crate) struct Settings {
     pub(crate) hotkey: Mutex<String>,
@@ -27,6 +77,7 @@ const DEFAULT_PASTE_MODE: &str = "paste";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = START_TIME.set(std::time::Instant::now());
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             do_show_popup(app);
@@ -45,7 +96,18 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            use std::io::Write;
+
             let handle = app.handle().clone();
+
+            if let Ok(dir) = handle.path().app_config_dir() {
+                if let Ok(mut f) = std::fs::File::create(dir.join("startup.log")) {
+                    let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                    let created = process_started_local().unwrap_or_default();
+                    let _ = writeln!(f, "--- snippetspot startup {stamp} (process started {created}) ---");
+                }
+            }
+            startup_log(&handle, "setup started");
 
             let settings = load_settings(&handle);
             let hotkey = settings.hotkey.lock().unwrap().clone();
@@ -67,14 +129,19 @@ pub fn run() {
                 cap: Mutex::new(clipboard_cap),
                 last_app_write: Mutex::new(std::time::Instant::now()),
             });
-            let pending_show_popup = Arc::new(AtomicBool::new(show_popup_on_startup));
+            let popup_ready_received = Arc::new(AtomicBool::new(false));
             handle.manage(apps::AppsState {
                 items: Mutex::new(Vec::new()),
             });
+            handle.manage(PopupFlags {
+                auto_hide: Mutex::new(true),
+            });
             apps::start_enumeration(handle.clone());
-
             if let Err(e) = hotkey::start_hotkey(handle.clone(), &hotkey) {
+                startup_log(&handle, &format!("hotkey FAILED: {e}"));
                 eprintln!("[snippetspot] failed to start hotkey: {e}");
+            } else {
+                startup_log(&handle, "hotkey registered");
             }
 
             if let Err(e) = build_tray(&handle) {
@@ -89,33 +156,37 @@ pub fn run() {
 
             if show_popup_on_startup {
                 let listener_handle = handle.clone();
-                let listener_pending = pending_show_popup.clone();
+                let listener_flag = popup_ready_received.clone();
                 let _ = handle.listen("popup-ready", move |_| {
-                    if listener_pending.swap(false, Ordering::SeqCst) {
-                        apply_window_effects(&listener_handle);
-                        crate::do_show_popup(&listener_handle);
-                    }
+                    listener_flag.store(true, Ordering::SeqCst);
+                    startup_log(&listener_handle, "popup-ready");
+                    apply_window_effects(&listener_handle);
+                    crate::do_show_popup_persistent(&listener_handle);
                 });
                 let fallback_handle = handle.clone();
+                let fallback_flag = popup_ready_received.clone();
                 std::thread::spawn(move || {
                     for _ in 0..60 {
                         std::thread::sleep(std::time::Duration::from_millis(500));
-                        if !pending_show_popup.load(Ordering::SeqCst) {
+                        if fallback_flag.load(Ordering::SeqCst) {
                             return;
                         }
                     }
-                    if pending_show_popup.swap(false, Ordering::SeqCst) {
+                    if !fallback_flag.swap(true, Ordering::SeqCst) {
+                        startup_log(&fallback_handle, "fallback show (popup-ready not received)");
                         apply_window_effects(&fallback_handle);
-                        crate::do_show_popup(&fallback_handle);
+                        crate::do_show_popup_persistent(&fallback_handle);
                     }
                 });
             }
+
+            startup_log(&handle, "setup done");
 
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Focused(false) = event {
-                if window.label() == "popup" {
+                if window.label() == "popup" && popup_auto_hide(window.app_handle()) {
                     let _ = window.hide();
                 }
             }
@@ -174,7 +245,24 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
+struct PopupFlags {
+    auto_hide: Mutex<bool>,
+}
+
+fn set_popup_auto_hide(app: &AppHandle, value: bool) {
+    if let Some(flags) = app.try_state::<PopupFlags>() {
+        *flags.auto_hide.lock().unwrap() = value;
+    }
+}
+
+fn popup_auto_hide(app: &AppHandle) -> bool {
+    app.try_state::<PopupFlags>()
+        .map(|flags| *flags.auto_hide.lock().unwrap())
+        .unwrap_or(true)
+}
+
 pub(crate) fn do_show_popup(app: &AppHandle) {
+    set_popup_auto_hide(app, true);
     if let Some(window) = app.get_webview_window("popup") {
         if let Ok(position) = app.cursor_position() {
             if let Ok(monitors) = app.available_monitors() {
@@ -204,6 +292,11 @@ pub(crate) fn do_show_popup(app: &AppHandle) {
     }
 }
 
+pub(crate) fn do_show_popup_persistent(app: &AppHandle) {
+    do_show_popup(app);
+    set_popup_auto_hide(app, false);
+}
+
 pub(crate) fn do_hide_popup(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("popup") {
         let _ = window.hide();
@@ -214,7 +307,25 @@ fn do_open_manager(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("manager") {
         let _ = window.show();
         let _ = window.set_focus();
+        return;
     }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        use tauri::{WebviewUrl, WebviewWindowBuilder};
+        if let Ok(window) = WebviewWindowBuilder::new(
+            &handle,
+            "manager",
+            WebviewUrl::App("index.html".into()),
+        )
+        .title("SnippetSpot")
+        .inner_size(920.0, 640.0)
+        .min_inner_size(680.0, 480.0)
+        .center()
+        .build()
+        {
+            let _ = window.set_focus();
+        }
+    });
 }
 
 fn apply_window_effects(app: &AppHandle) {
@@ -245,7 +356,12 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&open, &manager, &separator, &quit])?;
 
-    let _tray = TrayIconBuilder::with_id("main")
+    let tray = TrayIconBuilder::with_id("main");
+    let tray = match app.default_window_icon() {
+        Some(icon) => tray.icon(icon.clone()),
+        None => tray,
+    };
+    let _tray = tray
         .menu(&menu)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => do_show_popup(app),
