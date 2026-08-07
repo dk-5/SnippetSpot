@@ -25,12 +25,10 @@ import {
   clipboardGetEnabled,
   clipboardSetCap,
   clipboardSetEnabled,
-  getAutostart,
   getHotkey,
   getPasteMode,
   getShowOnStartup,
   readTextFile,
-  setAutostart as setAutostartApi,
   setHotkey as setHotkeyApi,
   setPasteMode as setPasteModeApi,
   setShowOnStartup as setShowOnStartupApi,
@@ -185,7 +183,6 @@ export function Manager() {
   const [currentHotkey, setCurrentHotkey] = useState(DEFAULT_HOTKEY);
   const [hotkeyError, setHotkeyError] = useState<string | null>(null);
   const [pasteMode, setPasteModeState] = useState<PasteMode>("paste");
-  const [autostart, setAutostartState] = useState(false);
   const [showOnStartup, setShowOnStartupState] = useState(false);
   const [clipboardEnabled, setClipboardEnabled] = useState(false);
   const [clipboardCap, setClipboardCap] = useState("500");
@@ -377,6 +374,7 @@ export function Manager() {
       await writeTextFile(p, content);
     } catch (err) {
       console.error("Export failed", err);
+      window.alert(`Export failed: ${String(err)}`);
     }
   };
 
@@ -401,22 +399,10 @@ export function Manager() {
     }
   };
 
-  const handleAutostart = async (enabled: boolean) => {
-    setAutostartState(enabled);
-    try {
-      await setAutostartApi(enabled);
-    } catch (err) {
-      console.error("Failed to set autostart", err);
-    }
-  };
-
   const handleShowOnStartup = async (enabled: boolean) => {
     setShowOnStartupState(enabled);
     try {
       await setShowOnStartupApi(enabled);
-      getAutostart()
-        .then(setAutostartState)
-        .catch(() => {});
     } catch (err) {
       console.error("Failed to set show-on-startup setting", err);
     }
@@ -455,10 +441,9 @@ export function Manager() {
       try {
         await initDb();
         const list = await reloadData();
-        const [hk, pm, as, sos, cl, cap] = await Promise.all([
+        const [hk, pm, sos, cl, cap] = await Promise.all([
           getHotkey().catch(() => DEFAULT_HOTKEY),
           getPasteMode().catch(() => "paste" as PasteMode),
-          getAutostart().catch(() => false),
           getShowOnStartup().catch(() => false),
           clipboardGetEnabled().catch(() => false),
           clipboardGetCap().catch(() => 500),
@@ -466,7 +451,6 @@ export function Manager() {
         if (cancelled) return;
         setCurrentHotkey(hk);
         setPasteModeState(pm);
-        setAutostartState(as);
         setShowOnStartupState(sos);
         setClipboardEnabled(cl);
         setClipboardCap(String(cap));
@@ -753,21 +737,6 @@ export function Manager() {
                   <option value="paste">Paste (Ctrl+V) — preserves clipboard</option>
                   <option value="type">Type characters — no clipboard touch</option>
                 </select>
-              </div>
-
-              <div>
-                <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--ss-text-dim)]">
-                  Launch at startup
-                </h3>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={autostart}
-                    onChange={(e) => handleAutostart(e.target.checked)}
-                    className="h-4 w-4 accent-[var(--ss-accent)]"
-                  />
-                  Open SnippetSpot at login
-                </label>
               </div>
 
               <div>
