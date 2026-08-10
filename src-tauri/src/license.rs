@@ -17,7 +17,7 @@ const SETTINGS_INSTALL_ID: &str = "install_id";
 const SETTINGS_TRIAL_STARTED_AT: &str = "trial_started_at";
 const SETTINGS_LICENSE_KEY: &str = "license_key";
 const SETTINGS_LICENSE_ACTIVATED_AT: &str = "license_activated_at";
-const REGISTER_URL: &str = "https://snippetshot.netlify.app/.netlify/functions/register";
+const REGISTER_URL: &str = "https://snippetspot.netlify.app/.netlify/functions/register";
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
