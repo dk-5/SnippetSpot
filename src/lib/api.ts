@@ -4,6 +4,7 @@ import type {
   AppItem,
   BackupInfo,
   ClipboardEntry,
+  LicenseStatus,
   PasteMode,
   VaultItem,
   VaultKind,
@@ -75,6 +76,18 @@ export function setShowOnStartup(enabled: boolean): Promise<void> {
   return call("set_show_on_startup", "Failed to set show-on-startup setting", {
     enabled,
   });
+}
+
+export function getLicenseStatus(): Promise<LicenseStatus> {
+  return call("get_license_status", "Failed to get license status");
+}
+
+export function activateLicense(key: string): Promise<string> {
+  return call("try_activate", "Failed to activate license", { key });
+}
+
+export function deactivateLicense(): Promise<void> {
+  return call("deactivate_license", "Failed to deactivate license");
 }
 
 export function readTextFile(path: string): Promise<string> {

@@ -129,7 +129,9 @@ fn prune_at(
     )
     .map_err(|e| e.to_string())?;
     let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM clipboard_entries", [], |row| row.get(0))
+        .query_row("SELECT COUNT(*) FROM clipboard_entries", [], |row| {
+            row.get(0)
+        })
         .map_err(|e| e.to_string())?;
     let to_delete = oldest_to_delete(total, cap);
     if to_delete > 0 {
@@ -213,14 +215,18 @@ pub fn clipboard_list(app: AppHandle) -> Result<Vec<ClipboardEntryDto>, String> 
             })
         })
         .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn clipboard_delete(app: AppHandle, id: String) -> Result<(), String> {
     let conn = crate::open_db(&app)?;
-    conn.execute("DELETE FROM clipboard_entries WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM clipboard_entries WHERE id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
     let _ = app.emit("clipboard-history-changed", ());
     Ok(())
 }
@@ -248,6 +254,7 @@ pub fn clipboard_toggle_pin(app: AppHandle, id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn clipboard_paste(app: AppHandle, id: String) -> Result<(), String> {
+    crate::license::ensure_allowed(&app)?;
     let conn = crate::open_db(&app)?;
     let content: String = conn
         .query_row(

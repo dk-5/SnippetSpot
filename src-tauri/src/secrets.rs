@@ -110,6 +110,8 @@ mod tests {
     #[test]
     fn looks_like_secret_rejects_normal_text() {
         assert!(!looks_like_secret("hello world"));
-        assert!(!looks_like_secret("just a normal snippet with a url https://example.com"));
+        assert!(!looks_like_secret(
+            "just a normal snippet with a url https://example.com"
+        ));
     }
 }

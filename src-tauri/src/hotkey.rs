@@ -10,17 +10,17 @@ pub const MOD_WIN: u16 = 0x0008;
 #[cfg(target_os = "windows")]
 mod imp {
     use super::*;
+    use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VIRTUAL_KEY,
+        GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
         UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN,
         WM_SYSKEYDOWN,
     };
-    use windows::core::PCWSTR;
 
     const WM_KEYDOWN_CODE: usize = WM_KEYDOWN as usize;
     const WM_SYSKEYDOWN_CODE: usize = WM_SYSKEYDOWN as usize;
@@ -82,7 +82,11 @@ mod imp {
         }
     }
 
-    unsafe extern "system" fn keyboard_hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe extern "system" fn keyboard_hook_proc(
+        code: i32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+    ) -> LRESULT {
         if code >= 0 {
             let kbd = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             let state = HOTKEY_STATE.load(Ordering::Relaxed);
@@ -232,7 +236,10 @@ mod tests {
 
     #[test]
     fn parses_multiple_modifiers() {
-        assert_eq!(parse_hotkey("Ctrl+Shift+T"), Ok((MOD_CTRL | MOD_SHIFT, b'T' as u16)));
+        assert_eq!(
+            parse_hotkey("Ctrl+Shift+T"),
+            Ok((MOD_CTRL | MOD_SHIFT, b'T' as u16))
+        );
         assert_eq!(
             parse_hotkey("Win+Alt+1"),
             Ok((MOD_WIN | MOD_ALT, b'1' as u16))

@@ -29,16 +29,14 @@ pub fn expand_variables(text: &str, clipboard: Option<&str>) -> String {
     }
 }
 
-fn expand_placeholder(
-    placeholder: &str,
-    now: &DateTime<Local>,
-    clipboard: Option<&str>,
-) -> String {
+fn expand_placeholder(placeholder: &str, now: &DateTime<Local>, clipboard: Option<&str>) -> String {
     match placeholder {
         "date" => now.format("%Y-%m-%d").to_string(),
         "time" => now.format("%H:%M").to_string(),
         "datetime" => now.format("%Y-%m-%d %H:%M").to_string(),
-        "clipboard" => clipboard.map(str::to_string).unwrap_or_else(|| original(placeholder)),
+        "clipboard" => clipboard
+            .map(str::to_string)
+            .unwrap_or_else(|| original(placeholder)),
         _ => {
             if let Some(rest) = placeholder.strip_prefix("env:") {
                 if let Some((name, default)) = rest.split_once(':') {
@@ -90,7 +88,10 @@ mod tests {
     fn env_placeholder() {
         let key = "SNIPPETSPOT_TEST_VAR";
         unsafe { std::env::set_var(key, "env-value") };
-        assert_eq!(expand_variables(&format!("{{{{env:{key}}}}}"), None), "env-value");
+        assert_eq!(
+            expand_variables(&format!("{{{{env:{key}}}}}"), None),
+            "env-value"
+        );
         unsafe { std::env::remove_var(key) };
         assert_eq!(expand_variables(&format!("{{{{env:{key}}}}}"), None), "");
     }

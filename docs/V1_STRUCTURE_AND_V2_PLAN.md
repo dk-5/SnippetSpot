@@ -2,10 +2,10 @@
 
 ## 1. v1 Overview
 
-SnippetSpot is a Windows-only, Spotlight-style launcher for personal text snippets.
-Press **Alt+Space**, type to fuzzy-search, press **Enter**, and the snippet is pasted
-into the previously focused application. Everything runs locally (SQLite + JSON);
-no cloud, no telemetry.
+SnippetSpot is a Windows-only, local-first search bar for your apps, text snippets and
+vault credentials. Press **Alt+Space**, type to fuzzy-search, press **Enter**, and the
+result is pasted into the previously focused application. Everything runs locally
+(SQLite + JSON); no cloud, no telemetry.
 
 **Stack:** Tauri 2 (Rust) · React 19 + TypeScript · Tailwind CSS v4 · Vite ·
 SQLite (`tauri-plugin-sql`) · `@leeoniya/ufuzzy` · `windows` crate.

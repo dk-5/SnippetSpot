@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 #[derive(Deserialize)]
@@ -69,7 +69,8 @@ pub fn vault_list(app: AppHandle) -> Result<Vec<VaultItemDto>, String> {
             })
         })
         .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -129,8 +130,11 @@ pub fn vault_update(app: AppHandle, id: String, input: VaultInput) -> Result<Vau
 #[tauri::command]
 pub fn vault_delete(app: AppHandle, id: String) -> Result<(), String> {
     let conn = crate::open_db(&app)?;
-    conn.execute("DELETE FROM vault_items WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM vault_items WHERE id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -142,6 +146,7 @@ pub fn vault_reveal_secret(app: AppHandle, id: String) -> Result<String, String>
 
 #[tauri::command]
 pub fn vault_copy_secret(app: AppHandle, id: String) -> Result<(), String> {
+    crate::license::ensure_allowed(&app)?;
     let blob = get_secret(&app, &id)?;
     let plaintext = crate::secrets::decrypt_secret(&blob)?;
     let mut clip = arboard::Clipboard::new().map_err(|e| e.to_string())?;
@@ -152,6 +157,7 @@ pub fn vault_copy_secret(app: AppHandle, id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn vault_paste_username(app: AppHandle, id: String) -> Result<(), String> {
+    crate::license::ensure_allowed(&app)?;
     let conn = crate::open_db(&app)?;
     let username: Option<String> = conn
         .query_row(
@@ -168,6 +174,7 @@ pub fn vault_paste_username(app: AppHandle, id: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn vault_paste_secret(app: AppHandle, id: String) -> Result<(), String> {
+    crate::license::ensure_allowed(&app)?;
     let blob = get_secret(&app, &id)?;
     let plaintext = crate::secrets::decrypt_secret(&blob)?;
     let mode = crate::current_paste_mode(&app);

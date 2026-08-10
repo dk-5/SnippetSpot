@@ -139,7 +139,10 @@ pub fn backup_list(app: AppHandle) -> Result<Vec<BackupInfoDto>, String> {
     if !dir.exists() {
         return Ok(infos);
     }
-    for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())?.flatten() {
+    for entry in std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("db") {
             continue;
@@ -208,17 +211,11 @@ mod tests {
 
     #[test]
     fn prune_keeps_newest_n() {
-        let dir = std::env::temp_dir().join(format!(
-            "snippetspot-backup-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("snippetspot-backup-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..6 {
-            std::fs::write(
-                dir.join(format!("snippetspot-20260806-10000{i}.db")),
-                b"x",
-            )
-            .unwrap();
+            std::fs::write(dir.join(format!("snippetspot-20260806-10000{i}.db")), b"x").unwrap();
         }
         std::fs::write(dir.join("settings.json"), b"{}").unwrap();
         let deleted = prune_backups(&dir, 3);
@@ -235,17 +232,11 @@ mod tests {
 
     #[test]
     fn prune_noop_when_under_cap() {
-        let dir = std::env::temp_dir().join(format!(
-            "snippetspot-backup-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("snippetspot-backup-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..2 {
-            std::fs::write(
-                dir.join(format!("snippetspot-20260806-10000{i}.db")),
-                b"x",
-            )
-            .unwrap();
+            std::fs::write(dir.join(format!("snippetspot-20260806-10000{i}.db")), b"x").unwrap();
         }
         let deleted = prune_backups(&dir, 5);
         assert_eq!(deleted, 0);

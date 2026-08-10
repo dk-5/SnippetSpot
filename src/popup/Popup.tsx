@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { emit } from "@tauri-apps/api/event";
-import type { AppItem, ClipboardEntry, SearchHit, Snippet, VaultItem } from "../lib/types";
+import type { AppItem, ClipboardEntry, LicenseStatus, SearchHit, Snippet, VaultItem } from "../lib/types";
 import { SnippetIndex } from "../lib/search";
 import {
   deleteSnippet,
@@ -10,6 +10,7 @@ import {
   recordUsage,
 } from "../lib/db";
 import {
+  activateLicense,
   appLaunch,
   appList,
   clipboardClear,
@@ -17,6 +18,7 @@ import {
   clipboardList,
   clipboardPaste,
   clipboardTogglePin,
+  getLicenseStatus,
   hidePopup,
   onAppsChanged,
   onClipboardHistoryChanged,
@@ -112,8 +114,13 @@ export function Popup() {
   const [vaultMenu, setVaultMenu] = useState<VaultItem | null>(null);
   const [menuSel, setMenuSel] = useState(0);
   const [diag, setDiag] = useState("");
+  const [license, setLicense] = useState<LicenseStatus | null>(null);
+  const [keyInput, setKeyInput] = useState("");
+  const [activateError, setActivateError] = useState("");
+  const [activating, setActivating] = useState(false);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const stateRef = useRef({ query, selected, index, apps, vaultItems, historyEntries, historyMode, vaultMenu, menuSel });
   stateRef.current = { query, selected, index, apps, vaultItems, historyEntries, historyMode, vaultMenu, menuSel };
 
@@ -145,6 +152,13 @@ export function Popup() {
     return out;
   }, [results, appResults, vaultResults]);
 
+  useEffect(() => {
+    const list = listRef.current;
+    if (!list) return;
+    const row = list.querySelector<HTMLElement>("[data-selected='true']");
+    row?.scrollIntoView({ block: "nearest" });
+  }, [selected, menuSel, historyMode, vaultMenu, results, vaultResults, appResults, historyResults]);
+
   const refresh = useCallback(async () => {
     await initDb();
     const s = await listSnippets();
@@ -170,6 +184,9 @@ export function Popup() {
 
   useEffect(() => {
     refresh();
+    getLicenseStatus()
+      .then(setLicense)
+      .catch(() => {});
     vaultList()
       .then(setVaultItems)
       .catch(() => {});
@@ -191,6 +208,9 @@ export function Popup() {
       setHistoryMode(false);
       setVaultMenu(null);
       inputRef.current?.focus();
+      getLicenseStatus()
+        .then(setLicense)
+        .catch(() => {});
       refresh();
       vaultList()
         .then(setVaultItems)
@@ -431,6 +451,7 @@ export function Popup() {
           type="button"
           onClick={() => clipboardPaste(entry.id).catch(() => {})}
           onMouseEnter={() => setSelected(i)}
+          data-selected={i === selected ? true : undefined}
           className={`flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-colors ${
             i === selected ? "bg-white/10" : "hover:bg-white/5"
           }`}
@@ -465,6 +486,7 @@ export function Popup() {
             type="button"
             onClick={() => handlePaste(hit.snippet)}
             onMouseEnter={() => setSelected(i)}
+            data-selected={i === selected ? true : undefined}
             className={`flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-colors ${
               i === selected ? "bg-white/10" : "hover:bg-white/5"
             }`}
@@ -510,6 +532,7 @@ export function Popup() {
                   tabIndex={-1}
                   onClick={() => setSelected(rowIndex)}
                   onMouseEnter={() => setSelected(rowIndex)}
+                  data-selected={rowSelected ? true : undefined}
                   className={`flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-colors ${
                     rowSelected ? "bg-white/10" : "hover:bg-white/5"
                   }`}
@@ -584,6 +607,7 @@ export function Popup() {
                               setVaultMenu(null);
                             }}
                             onMouseEnter={() => setMenuSel(i)}
+                            data-selected={i === menuSel ? true : undefined}
                             className={`rounded-lg px-3 py-1.5 text-left text-sm transition-colors ${
                               i === menuSel ? "bg-white/10" : "hover:bg-white/5"
                             }`}
@@ -616,10 +640,11 @@ export function Popup() {
                     appLaunch(app.path).catch((err) => setDiag(String(err)));
                     void hidePopup();
                   }}
-                  onMouseEnter={() => setSelected(rowIndex)}
-                  className={`flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-colors ${
-                    rowSelected ? "bg-white/10" : "hover:bg-white/5"
-                  }`}
+                    onMouseEnter={() => setSelected(rowIndex)}
+                    data-selected={rowSelected ? true : undefined}
+                    className={`flex w-full flex-col gap-1 rounded-lg px-3 py-2 text-left transition-colors ${
+                      rowSelected ? "bg-white/10" : "hover:bg-white/5"
+                    }`}
                 >
                   <span className="flex items-center gap-2">
                     <span className="shrink-0 text-sm text-[var(--ss-text-faint)]">
@@ -638,6 +663,60 @@ export function Popup() {
           </div>
         )}
       </>
+    );
+  }
+
+  if (license?.trialEnded) {
+    return (
+      <div className="flex h-full flex-col items-center justify-center gap-3 rounded-2xl border border-white/10 bg-[var(--ss-bg)] px-8 text-center shadow-2xl backdrop-blur-xl">
+        <div className="text-xl font-semibold text-[var(--ss-text)]">
+          Trial expired
+        </div>
+        <p className="text-sm text-[var(--ss-text-dim)]">
+          Your access to SnippetSpot has ended — activate a license key for{" "}
+          {license.trialDays} more days.
+        </p>
+        <div className="mt-1 flex w-full flex-col gap-2">
+          <input
+            value={keyInput}
+            onChange={(e) => setKeyInput(e.target.value)}
+            placeholder="Paste license key"
+            spellCheck={false}
+            className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-sm text-[var(--ss-text)] outline-none placeholder:text-[var(--ss-text-faint)] focus:border-[var(--ss-accent)]"
+          />
+          <button
+            type="button"
+            onClick={() => {
+              setActivating(true);
+              setActivateError("");
+              activateLicense(keyInput.trim())
+                .then(() => {
+                  setKeyInput("");
+                  getLicenseStatus().then(setLicense).catch(() => {});
+                })
+                .catch((err) => setActivateError(String(err)))
+                .finally(() => setActivating(false));
+            }}
+            disabled={activating}
+            className="w-full rounded-lg bg-[var(--ss-accent)] px-4 py-1.5 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {activating ? "Activating…" : "Activate"}
+          </button>
+          {activateError && (
+            <p className="text-xs text-red-400">{activateError}</p>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            void openManager();
+            void hidePopup();
+          }}
+          className="mt-1 rounded-lg bg-[var(--ss-accent)] px-4 py-1.5 text-sm font-medium text-white"
+        >
+          Manage
+        </button>
+      </div>
     );
   }
 
@@ -662,7 +741,7 @@ export function Popup() {
           Ctrl+F
         </span>
       </div>
-      <div className="flex-1 overflow-y-auto px-2 py-2">{body}</div>
+      <div ref={listRef} className="flex-1 overflow-y-auto px-2 py-2">{body}</div>
       <footer className="flex items-center justify-between border-t border-white/5 px-4 py-2 text-[11px] text-[var(--ss-text-faint)]">
         <span>
           {historyMode

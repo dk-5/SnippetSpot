@@ -42,11 +42,11 @@ fn set_clipboard(text: &str) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 mod imp {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VK_CONTROL,
-        VIRTUAL_KEY, KEYBD_EVENT_FLAGS,
-    };
     use windows::Win32::UI::Input::KeyboardAndMouse::SendInput;
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_CONTROL,
+    };
 
     pub(super) fn send_ctrl_v() {
         let inputs = [

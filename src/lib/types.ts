@@ -90,6 +90,15 @@ export interface BackupInfo {
   created_at: string;
 }
 
+export interface LicenseStatus {
+  status: "trial" | "expired" | "licensed";
+  trialDays: number;
+  trialDaysLeft: number;
+  trialEnded: boolean;
+  licensedEmail?: string | null;
+  licenseExpiresAt?: string | null;
+}
+
 export type ImportMergePolicy = "skip" | "overwrite" | "rename";
 
 export const VAULT_KINDS: { value: VaultKind; label: string }[] = [

@@ -1,8 +1,8 @@
 # SnippetSpot
 
-A Spotlight-style launcher for your personal text snippets. Press **Alt+Space**, type
-a few characters, hit **Enter**, and the snippet is pasted into whatever app you were
-working in — as if you'd typed it yourself.
+A fast, local-only search bar for your apps, snippets and vault credentials. Press
+**Alt+Space**, type a few characters, hit **Enter**, and the result is pasted into
+whatever app you were working in — as if you'd typed it yourself.
 
 Everything runs **100% locally**. No cloud, no accounts, no telemetry.
 
@@ -10,9 +10,10 @@ Everything runs **100% locally**. No cloud, no accounts, no telemetry.
 
 ## Features
 
-- **Global hotkey** — `Alt+Space` (configurable) opens the launcher anywhere, in under
+- **Global hotkey** — `Alt+Space` (configurable) opens the search bar anywhere, in under
   ~100 ms via a low-level Windows keyboard hook.
-- **Fuzzy search** — type fragments like `li`, `git`, `mail`, `res` to find "LinkedIn",
+- **Fuzzy search** — search snippets, apps, vault items and clipboard history from one
+  box; type fragments like `li`, `git`, `mail`, `res` to find "LinkedIn",
   "GitHub", "Email", "Resume Link".
 - **Smart ranking** — favorites, recently-used snippets, exact title matches, tag and
   category matches all boost results. Empty query = browse favorites first.

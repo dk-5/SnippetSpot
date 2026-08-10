@@ -2,6 +2,7 @@ mod apps;
 mod backup;
 mod clipboard;
 mod hotkey;
+mod license;
 mod migrate;
 mod paste;
 mod secrets;
@@ -32,12 +33,13 @@ fn process_started_local() -> Option<String> {
         )
         .is_ok()
         {
-            let ft =
-                ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+            let ft = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
             let unix_secs = (ft / 10_000_000).saturating_sub(11_644_473_600) as i64;
             if let Some(dt) = chrono::DateTime::from_timestamp(unix_secs, 0) {
                 return Some(
-                    dt.with_timezone(&chrono::Local).format("%H:%M:%S").to_string(),
+                    dt.with_timezone(&chrono::Local)
+                        .format("%H:%M:%S")
+                        .to_string(),
                 );
             }
         }
@@ -95,6 +97,7 @@ pub fn run() {
             None,
         ))
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             use std::io::Write;
 
@@ -104,7 +107,10 @@ pub fn run() {
                 if let Ok(mut f) = std::fs::File::create(dir.join("startup.log")) {
                     let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
                     let created = process_started_local().unwrap_or_default();
-                    let _ = writeln!(f, "--- snippetspot startup {stamp} (process started {created}) ---");
+                    let _ = writeln!(
+                        f,
+                        "--- snippetspot startup {stamp} (process started {created}) ---"
+                    );
                 }
             }
             startup_log(&handle, "setup started");
@@ -137,6 +143,8 @@ pub fn run() {
                 auto_hide: Mutex::new(true),
             });
             apps::start_enumeration(handle.clone());
+            license::start_license_worker(handle.clone());
+            check_for_updates(handle.clone());
             if let Err(e) = hotkey::start_hotkey(handle.clone(), &hotkey) {
                 startup_log(&handle, &format!("hotkey FAILED: {e}"));
                 eprintln!("[snippetspot] failed to start hotkey: {e}");
@@ -213,6 +221,9 @@ pub fn run() {
             set_autostart,
             get_show_on_startup,
             set_show_on_startup,
+            license::get_license_status,
+            license::try_activate,
+            license::deactivate_license,
             apps::app_list,
             apps::app_launch,
             read_text_file,
@@ -313,16 +324,13 @@ fn do_open_manager(app: &AppHandle) {
     let handle = app.clone();
     std::thread::spawn(move || {
         use tauri::{WebviewUrl, WebviewWindowBuilder};
-        if let Ok(window) = WebviewWindowBuilder::new(
-            &handle,
-            "manager",
-            WebviewUrl::App("index.html".into()),
-        )
-        .title("SnippetSpot")
-        .inner_size(920.0, 640.0)
-        .min_inner_size(680.0, 480.0)
-        .center()
-        .build()
+        if let Ok(window) =
+            WebviewWindowBuilder::new(&handle, "manager", WebviewUrl::App("index.html".into()))
+                .title("SnippetSpot")
+                .inner_size(920.0, 640.0)
+                .min_inner_size(680.0, 480.0)
+                .center()
+                .build()
         {
             let _ = window.set_focus();
         }
@@ -438,11 +446,17 @@ fn load_settings(app: &AppHandle) -> crate::Settings {
         changed = true;
     }
     if store.get("clipboard_history_enabled").is_none() {
-        store.set("clipboard_history_enabled", clipboard::DEFAULT_CLIPBOARD_HISTORY_ENABLED);
+        store.set(
+            "clipboard_history_enabled",
+            clipboard::DEFAULT_CLIPBOARD_HISTORY_ENABLED,
+        );
         changed = true;
     }
     if store.get("clipboard_history_cap").is_none() {
-        store.set("clipboard_history_cap", clipboard::DEFAULT_CLIPBOARD_HISTORY_CAP);
+        store.set(
+            "clipboard_history_cap",
+            clipboard::DEFAULT_CLIPBOARD_HISTORY_CAP,
+        );
         changed = true;
     }
     if store.get("backup_retention").is_none() {
@@ -515,7 +529,9 @@ pub(crate) fn open_db(app: &AppHandle) -> Result<rusqlite::Connection, String> {
 }
 
 pub(crate) fn now_iso() -> String {
-    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
+    chrono::Utc::now()
+        .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+        .to_string()
 }
 
 pub(crate) fn get_setting_value(app: &AppHandle, key: &str) -> Option<serde_json::Value> {
@@ -565,13 +581,15 @@ fn open_manager(app: AppHandle) {
 }
 
 #[tauri::command]
-fn paste_snippet(app: AppHandle, content: String) {
+fn paste_snippet(app: AppHandle, content: String) -> Result<(), String> {
+    license::ensure_allowed(&app)?;
     let clipboard = arboard::Clipboard::new()
         .and_then(|mut clip| clip.get_text().map(|t| t.to_string()))
         .ok();
     let expanded = variables::expand_variables(&content, clipboard.as_deref());
     let mode = current_paste_mode(&app);
     paste::paste_text(&app, &expanded, &mode);
+    Ok(())
 }
 
 #[tauri::command]
@@ -643,7 +661,11 @@ fn get_show_on_startup(app: AppHandle) -> bool {
 #[tauri::command]
 fn set_show_on_startup(app: AppHandle, enabled: bool) -> Result<(), String> {
     autostart_set(enabled)?;
-    crate::set_setting_value(&app, "show_popup_on_startup", serde_json::Value::Bool(enabled))?;
+    crate::set_setting_value(
+        &app,
+        "show_popup_on_startup",
+        serde_json::Value::Bool(enabled),
+    )?;
     if let Some(state) = app.try_state::<Settings>() {
         *state.show_popup_on_startup.lock().unwrap() = enabled;
     }
@@ -702,9 +724,11 @@ fn autostart_set(enabled: bool) -> Result<(), String> {
         for (name, _) in &entries {
             let _ = key.delete_value(name);
         }
-        key.set_value(AUTOSTART_VALUE, &value).map_err(|e| e.to_string())?;
+        key.set_value(AUTOSTART_VALUE, &value)
+            .map_err(|e| e.to_string())?;
         for (name, reg_value) in entries {
-            key.set_raw_value(name, &reg_value).map_err(|e| e.to_string())?;
+            key.set_raw_value(name, &reg_value)
+                .map_err(|e| e.to_string())?;
         }
         Ok(())
     } else {
@@ -732,6 +756,40 @@ fn autostart_reorder_if_needed() {
     if stored == format!("\"{}\"", exe.display()) {
         let _ = autostart_set(true);
     }
+}
+
+fn check_for_updates(app: AppHandle) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+    use tauri_plugin_updater::UpdaterExt;
+
+    std::thread::spawn(move || {
+        let Ok(updater) = app.updater() else {
+            return;
+        };
+        let Ok(Some(update)) = tauri::async_runtime::block_on(updater.check()) else {
+            return;
+        };
+        let message = format!(
+            "Version {} is available. Download and install it now?",
+            update.version
+        );
+        app.dialog()
+            .message(message)
+            .title("Update available")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::YesNo)
+            .show(move |confirmed| {
+                if confirmed {
+                    let handle = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        match update.download_and_install(|_, _| {}, || {}).await {
+                            Ok(_) => handle.restart(),
+                            Err(e) => eprintln!("[snippetspot] update failed: {e}"),
+                        }
+                    });
+                }
+            });
+    });
 }
 
 #[tauri::command]

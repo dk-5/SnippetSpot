@@ -1,9 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { DEFAULT_CATEGORIES, DEFAULT_HOTKEY, SNIPPET_TYPES } from "../lib/types";
 import type {
   ImportMergePolicy,
+  LicenseStatus,
   PasteMode,
   Snippet,
   SnippetInput,
@@ -21,11 +23,14 @@ import {
   updateSnippet,
 } from "../lib/db";
 import {
+  activateLicense,
   clipboardGetCap,
   clipboardGetEnabled,
   clipboardSetCap,
   clipboardSetEnabled,
+  deactivateLicense,
   getHotkey,
+  getLicenseStatus,
   getPasteMode,
   getShowOnStartup,
   readTextFile,
@@ -186,6 +191,11 @@ export function Manager() {
   const [showOnStartup, setShowOnStartupState] = useState(false);
   const [clipboardEnabled, setClipboardEnabled] = useState(false);
   const [clipboardCap, setClipboardCap] = useState("500");
+  const [license, setLicense] = useState<LicenseStatus | null>(null);
+  const [licenseKeyInput, setLicenseKeyInput] = useState("");
+  const [activating, setActivating] = useState(false);
+  const [licenseError, setLicenseError] = useState("");
+  const [licenseSuccess, setLicenseSuccess] = useState("");
   const [mergePolicy, setMergePolicy] = useState<ImportMergePolicy>("skip");
   const [exportOpen, setExportOpen] = useState(false);
   const titleRef = useRef<HTMLInputElement>(null);
@@ -435,18 +445,50 @@ export function Manager() {
     }
   };
 
+  const refreshLicense = () => {
+    getLicenseStatus().then(setLicense).catch(() => {});
+  };
+
+  const handleActivate = async () => {
+    setActivating(true);
+    setLicenseError("");
+    setLicenseSuccess("");
+    try {
+      const msg = await activateLicense(licenseKeyInput.trim());
+      setLicenseKeyInput("");
+      setLicenseSuccess(msg);
+      refreshLicense();
+    } catch (err) {
+      setLicenseError(String(err));
+    } finally {
+      setActivating(false);
+    }
+  };
+
+  const handleDeactivate = async () => {
+    try {
+      await deactivateLicense();
+      setLicenseError("");
+      setLicenseSuccess("");
+      refreshLicense();
+    } catch (err) {
+      alertError(`Failed to deactivate license: ${String(err)}`);
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         await initDb();
         const list = await reloadData();
-        const [hk, pm, sos, cl, cap] = await Promise.all([
+        const [hk, pm, sos, cl, cap, lic] = await Promise.all([
           getHotkey().catch(() => DEFAULT_HOTKEY),
           getPasteMode().catch(() => "paste" as PasteMode),
           getShowOnStartup().catch(() => false),
           clipboardGetEnabled().catch(() => false),
           clipboardGetCap().catch(() => 500),
+          getLicenseStatus().catch(() => null),
         ]);
         if (cancelled) return;
         setCurrentHotkey(hk);
@@ -454,6 +496,7 @@ export function Manager() {
         setShowOnStartupState(sos);
         setClipboardEnabled(cl);
         setClipboardCap(String(cap));
+        setLicense(lic);
         const target = localStorage.getItem("ss_edit_target");
         localStorage.removeItem("ss_edit_target");
         if (target) {
@@ -469,8 +512,14 @@ export function Manager() {
         console.error("Failed to initialize manager", err);
       }
     })();
+    const unlistenFocus = getCurrentWindow().onFocusChanged(({ payload }) => {
+      if (payload) {
+        getLicenseStatus().then(setLicense).catch(() => {});
+      }
+    });
     return () => {
       cancelled = true;
+      unlistenFocus.then((fn) => fn());
     };
   }, []);
 
@@ -781,6 +830,78 @@ export function Manager() {
                     />
                   </div>
                 </div>
+              </div>
+
+              <div>
+                <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--ss-text-dim)]">
+                  License
+                </h3>
+                {license ? (
+                  license.status === "licensed" ? (
+                    <div className="space-y-1.5 text-sm">
+                      <p className="text-emerald-400">Licensed</p>
+                      {license.licensedEmail && (
+                        <p className="text-[var(--ss-text-dim)]">
+                          {license.licensedEmail}
+                        </p>
+                      )}
+                      {license.trialDaysLeft > 0 && (
+                        <p className="text-[var(--ss-text-dim)]">
+                          {license.trialDaysLeft} day
+                          {license.trialDaysLeft === 1 ? "" : "s"} of access remaining
+                        </p>
+                      )}
+                      {license.licenseExpiresAt && (
+                        <p className="text-[var(--ss-text-dim)]">
+                          Expires {new Date(license.licenseExpiresAt).toLocaleDateString()}
+                        </p>
+                      )}
+                      <button
+                        type="button"
+                        onClick={handleDeactivate}
+                        className="mt-1 rounded border border-white/10 bg-white/5 px-3 py-1.5 text-sm text-[var(--ss-text)] hover:bg-white/10"
+                      >
+                        Deactivate
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {license.status === "expired" ? (
+                        <p className="text-sm text-red-400">
+                          Trial expired — activation required
+                        </p>
+                      ) : (
+                        <p className="text-sm text-[var(--ss-text)]">
+                          Trial: {license.trialDaysLeft} day
+                          {license.trialDaysLeft === 1 ? "" : "s"} of{" "}
+                          {license.trialDays} remaining
+                        </p>
+                      )}
+                      <input
+                        value={licenseKeyInput}
+                        onChange={(e) => setLicenseKeyInput(e.target.value)}
+                        placeholder="Paste your license key"
+                        className={inputCls}
+                      />
+                      <button
+                        type="button"
+                        onClick={handleActivate}
+                        disabled={activating}
+                        className="w-full rounded bg-[var(--ss-accent)] px-3 py-1.5 text-sm font-medium text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                      >
+                        {activating ? "Activating…" : "Activate"}
+                      </button>
+                      {licenseError && (
+                        <p className="text-xs text-red-400">{licenseError}</p>
+                      )}
+                      {licenseSuccess && (
+                        <p className="text-xs text-emerald-400">{licenseSuccess}</p>
+                      )}
+                    </div>
+                  )
+                ) : (
+                  <p className="text-sm text-[var(--ss-text-dim)]">Checking license…</p>
+                )}
               </div>
 
               <BackupsPanel onError={alertError} />

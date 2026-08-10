@@ -22,3 +22,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+src-tauri/snippetspot.key*
+netlify/.netlify*
+deploy/
+
+# License signing keys (dev-only, never shipped)
+scripts/license-keys/
+
+

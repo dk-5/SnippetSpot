@@ -12,6 +12,7 @@
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
     "autostart:default",
+    "updater:default",
     "dialog:default",
     {
       "identifier": "fs:allow-read-text-file",

@@ -64,7 +64,10 @@ pub fn app_list(app: AppHandle) -> Vec<AppItem> {
 }
 
 fn cache_path(app: &AppHandle) -> Option<std::path::PathBuf> {
-    app.path().app_config_dir().ok().map(|d| d.join("apps.json"))
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|d| d.join("apps.json"))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -142,7 +145,7 @@ fn save_cache(app: &AppHandle, items: &[AppItem]) {
 
 #[tauri::command]
 pub fn app_launch(app: AppHandle, path: String) -> Result<(), String> {
-    let _ = app;
+    crate::license::ensure_allowed(&app)?;
     launch_path(&path)
 }
 
@@ -242,18 +245,19 @@ mod imp {
         else {
             return;
         };
-        items.extend(parse_startapps_json(&String::from_utf8_lossy(&output.stdout)));
+        items.extend(parse_startapps_json(&String::from_utf8_lossy(
+            &output.stdout,
+        )));
     }
 
     pub fn launch_path(path: &str) -> Result<(), String> {
+        use windows::core::{HSTRING, PCWSTR};
         use windows::Win32::UI::Shell::ShellExecuteW;
         use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
-        use windows::core::{HSTRING, PCWSTR};
 
         let wide = HSTRING::from(path);
-        let result = unsafe {
-            ShellExecuteW(None, None, PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL)
-        };
+        let result =
+            unsafe { ShellExecuteW(None, None, PCWSTR(wide.as_ptr()), None, None, SW_SHOWNORMAL) };
         if (result.0 as isize) <= 32 {
             Err(format!("failed to launch '{path}'"))
         } else {
@@ -265,8 +269,7 @@ mod imp {
         let mut roots = Vec::new();
         if let Ok(appdata) = std::env::var("APPDATA") {
             roots.push(
-                std::path::PathBuf::from(appdata)
-                    .join("Microsoft\\Windows\\Start Menu\\Programs"),
+                std::path::PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs"),
             );
         }
         roots.push(std::path::PathBuf::from(
@@ -317,7 +320,10 @@ mod imp {
                     continue;
                 };
                 let name = strip_exe(&key_name);
-                items.push(AppItem { name, path: exe_path });
+                items.push(AppItem {
+                    name,
+                    path: exe_path,
+                });
             }
         }
     }
@@ -370,8 +376,14 @@ mod tests {
     #[test]
     fn filters_by_name_case_insensitively() {
         let items = vec![
-            AppItem { name: "Firefox".into(), path: "C:\\ff.exe".into() },
-            AppItem { name: "Notepad".into(), path: "C:\\np.exe".into() },
+            AppItem {
+                name: "Firefox".into(),
+                path: "C:\\ff.exe".into(),
+            },
+            AppItem {
+                name: "Notepad".into(),
+                path: "C:\\np.exe".into(),
+            },
         ];
         let result = filter_and_limit(&items, "FIRE", usize::MAX);
         assert_eq!(result.len(), 1);
@@ -381,8 +393,14 @@ mod tests {
     #[test]
     fn filter_respects_limit() {
         let items = vec![
-            AppItem { name: "Alpha".into(), path: "C:\\a.exe".into() },
-            AppItem { name: "Alphabet".into(), path: "C:\\b.exe".into() },
+            AppItem {
+                name: "Alpha".into(),
+                path: "C:\\a.exe".into(),
+            },
+            AppItem {
+                name: "Alphabet".into(),
+                path: "C:\\b.exe".into(),
+            },
         ];
         let result = filter_and_limit(&items, "alph", 1);
         assert_eq!(result.len(), 1);
@@ -400,7 +418,10 @@ mod tests {
                 name: "Code".into(),
                 path: "c:\\program files\\microsoft vs code\\code.exe".into(),
             },
-            AppItem { name: "Notepad".into(), path: "C:\\Windows\\Notepad.exe".into() },
+            AppItem {
+                name: "Notepad".into(),
+                path: "C:\\Windows\\Notepad.exe".into(),
+            },
         ];
         let result = dedupe_and_sort(items);
         assert_eq!(result.len(), 2);
