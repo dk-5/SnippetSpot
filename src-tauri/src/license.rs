@@ -13,6 +13,7 @@ const PREFIX: &str = "SS1-";
 
 pub const TRIAL_DAYS: u32 = 14;
 pub const LICENSE_GRACE_DAYS: u32 = 14;
+pub const TIER_FULL: &str = "full";
 const SETTINGS_INSTALL_ID: &str = "install_id";
 const SETTINGS_TRIAL_STARTED_AT: &str = "trial_started_at";
 const SETTINGS_LICENSE_KEY: &str = "license_key";
@@ -27,6 +28,7 @@ pub struct LicenseStatus {
     pub trial_days_left: i64,
     pub trial_ended: bool,
     pub licensed_email: Option<String>,
+    pub tier: Option<String>,
     pub license_expires_at: Option<String>,
 }
 
@@ -125,11 +127,19 @@ fn license_activated_at(app: &AppHandle) -> Option<chrono::DateTime<chrono::Utc>
 }
 
 fn license_deadline(
+    payload: &LicensePayload,
     activated_at: chrono::DateTime<chrono::Utc>,
-    payload_expires_at: &Option<String>,
 ) -> chrono::DateTime<chrono::Utc> {
+    if payload.tier == TIER_FULL {
+        if let Some(expires) = &payload.expires_at {
+            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(expires) {
+                return t.with_timezone(&chrono::Utc);
+            }
+        }
+        return activated_at + chrono::Duration::days(3650);
+    }
     let mut deadline = activated_at + chrono::Duration::days(LICENSE_GRACE_DAYS as i64);
-    if let Some(expires) = payload_expires_at {
+    if let Some(expires) = &payload.expires_at {
         if let Ok(t) = chrono::DateTime::parse_from_rfc3339(expires) {
             let expires = t.with_timezone(&chrono::Utc);
             if expires < deadline {
@@ -150,7 +160,7 @@ fn license_window(app: &AppHandle) -> Option<LicensePayload> {
             now
         }
     };
-    let deadline = license_deadline(activated_at, &license.expires_at);
+    let deadline = license_deadline(&license, activated_at);
     if chrono::Utc::now() > deadline {
         return None;
     }
@@ -164,7 +174,7 @@ pub fn is_licensed(app: &AppHandle) -> bool {
 pub fn trial_status(app: &AppHandle) -> LicenseStatus {
     if let Some(license) = license_window(app) {
         let activated_at = license_activated_at(app).unwrap_or_else(chrono::Utc::now);
-        let deadline = license_deadline(activated_at, &license.expires_at);
+        let deadline = license_deadline(&license, activated_at);
         let days_left = ((deadline - chrono::Utc::now()).num_days()).max(0);
         return LicenseStatus {
             status: "licensed".to_string(),
@@ -172,6 +182,7 @@ pub fn trial_status(app: &AppHandle) -> LicenseStatus {
             trial_days_left: days_left,
             trial_ended: false,
             licensed_email: Some(license.email),
+            tier: Some(license.tier.clone()),
             license_expires_at: Some(deadline.to_rfc3339()),
         };
     }
@@ -182,6 +193,7 @@ pub fn trial_status(app: &AppHandle) -> LicenseStatus {
             trial_days_left: 0,
             trial_ended: true,
             licensed_email: None,
+            tier: None,
             license_expires_at: None,
         };
     }
@@ -203,6 +215,7 @@ pub fn trial_status(app: &AppHandle) -> LicenseStatus {
         trial_days_left: days_left.max(0),
         trial_ended,
         licensed_email: None,
+        tier: None,
         license_expires_at: None,
     }
 }
@@ -255,10 +268,19 @@ pub fn try_activate(app: AppHandle, key: String) -> Result<String, String> {
         SETTINGS_LICENSE_ACTIVATED_AT,
         &chrono::Utc::now().to_rfc3339(),
     );
-    Ok(format!(
-        "Activated for {} — {} days of access granted",
-        payload.email, LICENSE_GRACE_DAYS
-    ))
+    let message = if payload.tier == TIER_FULL {
+        let until = payload
+            .expires_at
+            .clone()
+            .unwrap_or_else(|| "permanent".to_string());
+        format!("Activated for {} — full license until {}", payload.email, until)
+    } else {
+        format!(
+            "Activated for {} — {} days of access granted",
+            payload.email, LICENSE_GRACE_DAYS
+        )
+    };
+    Ok(message)
 }
 
 #[tauri::command]
@@ -280,10 +302,10 @@ mod tests {
         ed25519_dalek::SigningKey::from_bytes(&[7u8; 32])
     }
 
-    fn make_payload(email: &str, expires_at: Option<String>) -> LicensePayload {
+    fn make_payload(email: &str, tier: &str, expires_at: Option<String>) -> LicensePayload {
         LicensePayload {
             email: email.to_string(),
-            tier: "standard".to_string(),
+            tier: tier.to_string(),
             issued_at: chrono::Utc::now().to_rfc3339(),
             expires_at,
         }
@@ -309,7 +331,7 @@ mod tests {
     fn round_trip_valid_key() {
         let key = seed_key();
         let public = key.verifying_key().to_bytes();
-        let payload = make_payload("tester@example.com", Some(future()));
+        let payload = make_payload("tester@example.com", "standard", Some(future()));
         let encoded = encode_key(&key, &payload);
         let parsed = parse_key(&encoded, &public).expect("valid key should parse");
         assert_eq!(parsed.email, "tester@example.com");
@@ -321,7 +343,7 @@ mod tests {
     fn perpetual_key_valid() {
         let key = seed_key();
         let public = key.verifying_key().to_bytes();
-        let payload = make_payload("tester@example.com", None);
+        let payload = make_payload("tester@example.com", "standard", None);
         let encoded = encode_key(&key, &payload);
         assert!(parse_key(&encoded, &public).is_ok());
     }
@@ -330,7 +352,7 @@ mod tests {
     fn expired_key_rejected() {
         let key = seed_key();
         let public = key.verifying_key().to_bytes();
-        let payload = make_payload("tester@example.com", Some(past()));
+        let payload = make_payload("tester@example.com", "standard", Some(past()));
         let encoded = encode_key(&key, &payload);
         let err = parse_key(&encoded, &public).expect_err("expired key should be rejected");
         assert!(err.contains("expired"));
@@ -340,7 +362,7 @@ mod tests {
     fn tampered_key_rejected() {
         let key = seed_key();
         let public = key.verifying_key().to_bytes();
-        let payload = make_payload("tester@example.com", Some(future()));
+        let payload = make_payload("tester@example.com", "standard", Some(future()));
         let mut bytes = encode_key(&key, &payload).into_bytes();
         let mid = bytes.len() / 2;
         bytes[mid] = if bytes[mid] == b'A' { b'B' } else { b'A' };
@@ -352,7 +374,7 @@ mod tests {
     fn wrong_public_key_rejected() {
         let key = seed_key();
         let wrong_public = [0x11u8; 32];
-        let payload = make_payload("tester@example.com", Some(future()));
+        let payload = make_payload("tester@example.com", "standard", Some(future()));
         let encoded = encode_key(&key, &payload);
         assert!(parse_key(&encoded, &wrong_public).is_err());
     }
@@ -366,7 +388,7 @@ mod tests {
         }
         let seed_hex = std::fs::read_to_string(seed_path).expect("read seed");
         let signing = ed25519_dalek::SigningKey::from_bytes(&hex_decode(seed_hex.trim()));
-        let payload = make_payload("tester@example.com", Some(future()));
+        let payload = make_payload("tester@example.com", "standard", Some(future()));
         let encoded = encode_key(&signing, &payload);
         let parsed = parse_key(&encoded, &LICENSE_PUBLIC_KEY)
             .expect("embedded public key should verify the dev keypair");
@@ -376,7 +398,8 @@ mod tests {
     #[test]
     fn license_deadline_no_payload_expiry() {
         let activated_at = chrono::Utc::now();
-        let deadline = license_deadline(activated_at, &None);
+        let payload = make_payload("tester@example.com", "standard", None);
+        let deadline = license_deadline(&payload, activated_at);
         assert_eq!(deadline, activated_at + chrono::Duration::days(14));
     }
 
@@ -384,10 +407,11 @@ mod tests {
     fn license_deadline_payload_expiry_sooner() {
         let activated_at = chrono::Utc::now();
         let expires_at = Some((activated_at + chrono::Duration::days(5)).to_rfc3339());
-        let deadline = license_deadline(activated_at, &expires_at);
+        let payload = make_payload("tester@example.com", "standard", expires_at);
+        let deadline = license_deadline(&payload, activated_at);
         assert_eq!(
             deadline,
-            chrono::DateTime::parse_from_rfc3339(expires_at.as_ref().unwrap())
+            chrono::DateTime::parse_from_rfc3339(payload.expires_at.as_ref().unwrap())
                 .unwrap()
                 .with_timezone(&chrono::Utc)
         );
@@ -397,7 +421,45 @@ mod tests {
     fn license_deadline_payload_expiry_later() {
         let activated_at = chrono::Utc::now();
         let expires_at = Some((activated_at + chrono::Duration::days(30)).to_rfc3339());
-        let deadline = license_deadline(activated_at, &expires_at);
+        let payload = make_payload("tester@example.com", "standard", expires_at);
+        let deadline = license_deadline(&payload, activated_at);
         assert_eq!(deadline, activated_at + chrono::Duration::days(14));
+    }
+
+    #[test]
+    fn license_deadline_full_tier_ignores_grace() {
+        let activated_at = chrono::Utc::now();
+        let expires_at = Some((activated_at + chrono::Duration::days(30)).to_rfc3339());
+        let payload = make_payload("tester@example.com", TIER_FULL, expires_at);
+        let deadline = license_deadline(&payload, activated_at);
+        assert_eq!(
+            deadline,
+            chrono::DateTime::parse_from_rfc3339(payload.expires_at.as_ref().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        );
+        assert_ne!(deadline, activated_at + chrono::Duration::days(14));
+    }
+
+    #[test]
+    fn license_deadline_full_tier_no_expiry() {
+        let activated_at = chrono::Utc::now();
+        let payload = make_payload("tester@example.com", TIER_FULL, None);
+        let deadline = license_deadline(&payload, activated_at);
+        assert_eq!(deadline, activated_at + chrono::Duration::days(3650));
+    }
+
+    #[test]
+    fn license_deadline_renew_tier() {
+        let activated_at = chrono::Utc::now();
+        let expires_at = Some((activated_at + chrono::Duration::days(14)).to_rfc3339());
+        let payload = make_payload("tester@example.com", TIER_RENEW, expires_at);
+        let deadline = license_deadline(&payload, activated_at);
+        assert_eq!(
+            deadline,
+            chrono::DateTime::parse_from_rfc3339(payload.expires_at.as_ref().unwrap())
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        );
     }
 }

@@ -23,8 +23,11 @@ const usage = `SnippetSpot license keygen
       Generate a new Ed25519 signing keypair into scripts/license-keys/.
       Prints the public key hex to embed as LICENSE_PUBLIC_KEY in license.rs.
 
-  node scripts/keygen.mjs issue <email> [--days N | --permanent]
-      Issue a signed license key for an email. Default: 1 year.
+  node scripts/keygen.mjs issue <email> [--full | --renew] [--days N]
+      Issue a signed license key for an email.
+      --full    fixed-period full license (default 1 year, override with --days N)
+      --renew   14-day renewal license
+      default   standard license (default 1 year; --permanent for no expiry)
       Output: a key that starts with ${PREFIX}
 
   node scripts/keygen.mjs check <key>
@@ -58,15 +61,22 @@ function embeddedPublic() {
   return Buffer.from(bytes);
 }
 
-function issue(email, days, permanent) {
+function issue(email, days, tier, permanent) {
   if (!existsSync(PRIVATE_PEM)) throw new Error("Run gen first");
   const pem = readFileSync(PRIVATE_PEM);
-  const expires = permanent
-    ? null
-    : new Date(Date.now() + (days ?? 365) * 86400000).toISOString();
+  let expires;
+  if (tier === "full") {
+    expires = new Date(Date.now() + (days ?? 365) * 86400000).toISOString();
+  } else if (tier === "renew") {
+    expires = new Date(Date.now() + 14 * 86400000).toISOString();
+  } else {
+    expires = permanent
+      ? null
+      : new Date(Date.now() + (days ?? 365) * 86400000).toISOString();
+  }
   const payload = {
     email,
-    tier: "standard",
+    tier,
     issuedAt: new Date().toISOString(),
     expiresAt: expires,
   };
@@ -122,10 +132,14 @@ if (!cmd) {
   console.log(rawPublic(pem));
 } else if (cmd === "issue") {
   if (!a) throw new Error("Missing <email>");
-  const daysArg = process.argv.indexOf("--days");
+  const full = process.argv.includes("--full");
+  const renew = process.argv.includes("--renew");
   const permanent = process.argv.includes("--permanent");
+  if (full && renew) throw new Error("--full and --renew are mutually exclusive");
+  const daysArg = process.argv.indexOf("--days");
   const days = daysArg !== -1 ? Number(process.argv[daysArg + 1]) : 365;
-  console.log(issue(a, Number.isFinite(days) ? days : 365, permanent));
+  const tier = full ? "full" : renew ? "renew" : "standard";
+  console.log(issue(a, Number.isFinite(days) ? days : 365, tier, permanent));
 } else if (cmd === "check") {
   if (!a) throw new Error("Missing <key>");
   console.log(JSON.stringify(check(a), null, 2));

@@ -97,6 +97,7 @@ export interface LicenseStatus {
   trialEnded: boolean;
   licensedEmail?: string | null;
   licenseExpiresAt?: string | null;
+  tier?: string | null;
 }
 
 export type ImportMergePolicy = "skip" | "overwrite" | "rename";

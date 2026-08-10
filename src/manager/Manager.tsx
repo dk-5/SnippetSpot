@@ -845,16 +845,26 @@ export function Manager() {
                           {license.licensedEmail}
                         </p>
                       )}
-                      {license.trialDaysLeft > 0 && (
+                      {license.tier === "full" ? (
                         <p className="text-[var(--ss-text-dim)]">
-                          {license.trialDaysLeft} day
-                          {license.trialDaysLeft === 1 ? "" : "s"} of access remaining
+                          {license.licenseExpiresAt
+                            ? `Full license · Valid until ${new Date(license.licenseExpiresAt).toLocaleDateString()}`
+                            : "Full license · No expiration"}
                         </p>
-                      )}
-                      {license.licenseExpiresAt && (
-                        <p className="text-[var(--ss-text-dim)]">
-                          Expires {new Date(license.licenseExpiresAt).toLocaleDateString()}
-                        </p>
+                      ) : (
+                        <>
+                          {license.trialDaysLeft > 0 && (
+                            <p className="text-[var(--ss-text-dim)]">
+                              {license.trialDaysLeft} day
+                              {license.trialDaysLeft === 1 ? "" : "s"} of access remaining
+                            </p>
+                          )}
+                          {license.licenseExpiresAt && (
+                            <p className="text-[var(--ss-text-dim)]">
+                              Expires {new Date(license.licenseExpiresAt).toLocaleDateString()}
+                            </p>
+                          )}
+                        </>
                       )}
                       <button
                         type="button"
